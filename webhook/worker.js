@@ -205,8 +205,12 @@ async function fetchFlavourVersions(kRepo, ghToken) {
         for (const key of Object.keys(versions)) {
           if (name.toLowerCase().includes(key.toLowerCase()) && name.toLowerCase().includes("anykernel3")) {
             const m = name.match(/(\d+\.\d+\.\d+)/);
+            let dev = "";
+            if (name.toLowerCase().includes("peridot")) {
+              dev = "peridot ";
+            }
             if (m) {
-              versions[key] = m[1];
+              versions[key] = dev ? `${dev}${m[1]}` : m[1];
             }
           }
         }

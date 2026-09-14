@@ -31,6 +31,11 @@ on:
         required: false
         default: "Unknown"
         type: string
+      device_target:
+        description: "Optional device target filter (e.g. peridot, or empty for generic GKI)"
+        required: false
+        default: ""
+        type: string
 
 jobs:
   patch:
@@ -131,14 +136,34 @@ jobs:
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json")
 
-          # Select newest non-expired AnyKernel3 artifact containing the variant
-          ARTIFACT=$(echo "$ARTIFACT_JSON" | jq -r \
-            --arg v "$VARIANT" \
-            '[.artifacts[] | select(
-              (.name | test($v; "i")) and
-              (.name | test("AnyKernel3"; "i")) and
-              (.expired == false)
-            )] | sort_by(.created_at) | last')
+          DEVICE="${{ inputs.device_target }}"
+          ARTIFACT=""
+
+          # 1. First attempt: match variant AND device target (e.g. peridot) if specified
+          if [ -n "$DEVICE" ]; then
+            echo "Searching for device-specific build matching: ${DEVICE} + ${VARIANT}"
+            ARTIFACT=$(echo "$ARTIFACT_JSON" | jq -r \
+              --arg v "$VARIANT" \
+              --arg d "$DEVICE" \
+              '[.artifacts[] | select(
+                (.name | test($v; "i")) and
+                (.name | test($d; "i")) and
+                (.name | test("AnyKernel3"; "i")) and
+                (.expired == false)
+              )] | sort_by(.created_at) | last // empty')
+          fi
+
+          # 2. Fallback: match any non-expired AnyKernel3 build for the requested variant
+          if [ -z "$ARTIFACT" ] || [ "$ARTIFACT" = "null" ]; then
+            echo "Selecting latest universal/GKI build for: ${VARIANT}"
+            ARTIFACT=$(echo "$ARTIFACT_JSON" | jq -r \
+              --arg v "$VARIANT" \
+              '[.artifacts[] | select(
+                (.name | test($v; "i")) and
+                (.name | test("AnyKernel3"; "i")) and
+                (.expired == false)
+              )] | sort_by(.created_at) | last // empty')
+          fi
 
           ARTIFACT_NAME=$(echo "$ARTIFACT" | jq -r '.name // empty')
           ARTIFACT_URL=$(echo "$ARTIFACT" | jq -r '.archive_download_url // empty')
