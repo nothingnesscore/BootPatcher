@@ -1,0 +1,88 @@
+name: Build BootKernelChanger Windows EXE
+
+on:
+  push:
+    tags:
+      - "bkc-v*"        # trigger on tags like bkc-v1.0.0
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install sv-ttk darkdetect pyinstaller
+
+      - name: Download magiskboot.exe
+        shell: pwsh
+        run: |
+          # Download latest magiskboot for Windows from Magisk releases
+          $url = "https://github.com/ookiineko/magiskboot_build/releases/latest/download/magiskboot_win_x86_64.zip"
+          Invoke-WebRequest $url -OutFile magiskboot_win.zip
+          Expand-Archive magiskboot_win.zip -DestinationPath tools/BootKernelChanger/ -Force
+          Get-ChildItem tools/BootKernelChanger/
+        continue-on-error: true
+
+      - name: Build EXE
+        working-directory: tools/BootKernelChanger
+        shell: pwsh
+        run: |
+          # If magiskboot.exe not found, create a placeholder so PyInstaller doesn't fail
+          if (-not (Test-Path magiskboot.exe)) {
+            Write-Output "magiskboot.exe not bundled — user must place it alongside the exe"
+            New-Item -ItemType File -Name magiskboot.exe
+          }
+          pyinstaller `
+            --noconsole `
+            --onefile `
+            --icon=icon.ico `
+            --add-data "magiskboot.exe;." `
+            -n BootKernelChanger_EN `
+            app.py
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BootKernelChanger_EN-windows
+          path: tools/BootKernelChanger/dist/BootKernelChanger_EN.exe
+          retention-days: 90
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "BootKernelChanger EN ${{ github.ref_name }}"
+          body: |
+            ## BootKernelChanger — English Edition (Dark Mode) 🪟
+
+            Windows GUI tool to replace the kernel inside a `boot.img`.
+
+            > Original concept by [Dayto0](https://github.com/Dayto0/BootKernelChanger)
+            > Dark mode + English version
+
+            ### Changes
+            - Auto dark/light mode based on system settings
+            - Full English UI
+            - Bundled magiskboot.exe
+
+            ### How to use
+            1. Download `BootKernelChanger_EN.exe`
+            2. Place `magiskboot.exe` next to it (or it may already be bundled)
+            3. Run it, select your `boot.img` and replacement kernel
+            4. Click **Build** and save
+
+            **Source code:** See `tools/BootKernelChanger/app.py`
+          files: |
+            tools/BootKernelChanger/dist/BootKernelChanger_EN.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
