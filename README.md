@@ -1,44 +1,108 @@
 # BootPatcher 🔧
 
-> A GitHub Actions-powered Telegram bot that automatically patches your stock `boot.img` with the latest **BruhKernel** (android14-6.1) kernel.
+> A **GitHub Actions-powered Telegram bot** that patches your stock `boot.img` with the latest [BruhKernel](https://github.com/nothingnesscore/BruhKernel) (android14-6.1). No PC needed — just send your file.
 
-## Usage
+---
 
-Just send your `boot.img` to the bot on Telegram — it handles everything automatically.
+## 🚀 How to get your patched boot.img (newbie guide)
 
-1. Send `/start` to get started
-2. Upload your `boot.img` as a **file** (not photo/video)
-3. Choose the kernel variant you want
-4. Wait ~5 minutes
-5. Receive your patched `boot.img` directly in chat 🎉
+> ⏱ Takes about **5–7 minutes** total
 
-## How it works
+**Step 1** — Open the bot on Telegram  
+→ Search for **@umbromomento_bot** or click the link your device came with
+
+**Step 2** — Send your `boot.img` as a **File**  
+→ In Telegram, tap the 📎 paperclip → pick **File** (NOT photo/video)  
+→ Navigate to your `boot.img` and send it
+
+**Step 3** — Read the analysis the bot shows you  
+→ The bot will tell you your stock kernel version, arch, compression type
+
+**Step 4** — Pick a kernel flavour  
+→ Tap one of the 4 buttons: SukiSU (recommended), KernelSU-Next, WKSU, or ReSukiSU
+
+**Step 5** — Wait for GitHub Actions to do the work  
+→ The bot will message you as it progresses  
+→ When done, it sends back your **patched_boot.img** directly
+
+**Step 6** — Flash the patched boot.img  
+→ Boot into recovery (TWRP / OrangeFox)  
+→ Flash `patched_boot.img` via **Install → Install Image → Boot Partition**  
+→ Reboot and enjoy your patched kernel! 🎉
+
+---
+
+## How it works (technical)
 
 ```
-You → Upload boot.img to Telegram bot
+You → Send boot.img to bot
         ↓
-Bot → Triggers GitHub Actions workflow
+Bot → Analyses kernel version, arch, compression locally
+Bot → Shows you the analysis + flavour picker buttons
         ↓
-GH Actions → Downloads latest BruhKernel (android14-6.1)
-           → Unpacks your boot.img with magiskboot
+You → Pick a kernel flavour
+        ↓
+Bot → Uploads boot.img to temporary hosting
+Bot → Triggers GitHub Actions patch workflow
+        ↓
+GH Actions → Downloads latest BruhKernel (android14-6.1) artifact
+           → magiskboot unpack stock boot.img
            → Swaps old kernel → new kernel
-           → Repacks boot.img
+           → magiskboot repack
         ↓
-Bot → Sends patched boot.img back to you
+Bot → Sends patched_boot.img back to you on Telegram
 ```
 
-## Kernel variants
+---
 
-All kernels come from [nothingnesscore/BruhKernel](https://github.com/nothingnesscore/BruhKernel), android14-6.1:
+## Kernel flavours
 
-| Variant | Description |
+All kernels from [nothingnesscore/BruhKernel](https://github.com/nothingnesscore/BruhKernel), android14-6.1:
+
+| Flavour | Description |
 |---------|-------------|
-| **SukiSU** *(default)* | SukiSU Ultra with SUSFS |
-| **KernelSU-Next** | KernelSU Next with SUSFS |
-| **WKSU** | Wild KernelSU |
-| **ReSukiSU** | Re-compiled SukiSU |
+| 🟣 **SukiSU** *(recommended)* | SukiSU Ultra + SUSFS + NoMount |
+| 🔵 **KernelSU-Next** | KernelSU Next + SUSFS |
+| 🟤 **WKSU** | Wild KernelSU |
+| 🟢 **ReSukiSU** | Re-compiled SukiSU |
+
+---
+
+## Use your own kernel fork (for developers)
+
+If you maintain your own BruhKernel fork:
+
+1. Fork [nothingnesscore/BruhKernel](https://github.com/nothingnesscore/BruhKernel)
+2. Build your kernel — it should publish AnyKernel3 artifacts with the same naming pattern
+3. In the bot, after sending your boot.img, tap **⚙️ Custom kernel repo**
+4. Type your repo as `owner/repo` (e.g. `myuser/MyKernelFork`)
+5. Pick your flavour and patch!
+
+---
+
+## Coming soon 🚧
+
+| Feature | Status |
+|---------|--------|
+| Android app (root required) | 🔜 Soon |
+| Auto-detect matching kernel version from boot.img | 🔜 Soon |
+| Support for more android versions / branches | 🔜 Soon |
+
+---
+
+## Credits
+
+- 🔧 **Original patching concept** — [Dayto0/BootKernelChanger](https://github.com/Dayto0/BootKernelChanger) by **@dayt0**  
+- 🐧 **Kernel builds** — [nothingnesscore/BruhKernel](https://github.com/nothingnesscore/BruhKernel)  
+- ⚙️ **Repacking engine** — [magiskboot](https://github.com/topjohnwu/Magisk) by topjohnwu
+
+---
 
 ## Troubleshooting
 
-- **No response?** → The bot may be restarting, try again in a minute
-- **Patch failed?** → You'll get a link to the Actions log with details
+| Problem | Fix |
+|---------|-----|
+| Bot not responding | It may be restarting (~6h cycle), try again in a minute |
+| "No artifact found" | The kernel repo hasn't built recently, or wrong repo name |
+| Patch fails | Tap the Actions link the bot sends and check logs |
+| Wrong boot partition after flash | Make sure you're flashing to the correct slot (A/B) |
