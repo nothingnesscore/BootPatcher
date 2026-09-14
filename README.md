@@ -88,7 +88,8 @@ We are planning an on-device Android application for rooted users to eliminate P
 ## 💻 Desktop Tool: BootKernelChanger (English + Auto Dark Mode)
 
 For users who prefer offline patching on Windows PC:
-* Located in [`tools/BootKernelChanger/`](tools/BootKernelChanger/).
+* 📥 **[Download Latest Release (v1.0.0)](https://github.com/nothingnesscore/BootPatcher/releases/tag/v1.0.0)** — Standalone Windows 64-bit `.exe`.
+* Source code located in [`tools/BootKernelChanger/`](tools/BootKernelChanger/).
 * **Features:**
   * Native English user interface.
   * **Auto Dark Mode:** Detects Windows 10/11 system light/dark theme using `darkdetect` and applies the Sun Valley theme (`sv-ttk`).
