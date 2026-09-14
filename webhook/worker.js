@@ -5,17 +5,11 @@
  *
  * How it works:
  * 1. User sends boot.img to @umbromomento_bot.
- * 2. Telegram triggers this serverless webhook (<20ms).
- * 3. User chooses their kernel flavour (SukiSU, KernelSU-Next, WKSU, ReSukiSU).
- * 4. This worker dispatches GitHub Actions (patch-boot.yml) on-demand!
- * 5. GitHub Actions runner fires up ONLY for the duration of the patch (~3 min),
- *    delivers patched_boot.img directly to the user's Telegram, and shuts down.
- *
- * Environment Secrets required in Cloudflare Worker:
- * - TELEGRAM_BOT_TOKEN : BotFather token
- * - GITHUB_TOKEN       : GitHub PAT with repo + workflow scopes
- * - GITHUB_REPO        : "nothingnesscore/BootPatcher"
- * - KERNEL_REPO        : "nothingnesscore/BruhKernel" (optional)
+ * 2. Worker inspects image headers & queries available kernel versions.
+ * 3. User chooses their flavour button with respective target version.
+ * 4. Worker dispatches GitHub Actions (patch-boot.yml) on-demand.
+ * 5. Runner unpacks, verifies strings, replaces kernel, repacks,
+ *    and delivers patched_boot.img directly to the user's Telegram!
  */
 
 export default {
@@ -35,8 +29,8 @@ export default {
   },
 };
 
-const FLAVOURS = [
-  { id: "SukiSU",        label: "🟣 SukiSU Ultra (Recommended)" },
+const BASE_FLAVOURS = [
+  { id: "SukiSU",        label: "🟣 SukiSU Ultra" },
   { id: "KernelSU-Next", label: "🔵 KernelSU-Next" },
   { id: "WKSU",          label: "🟤 WKSU" },
   { id: "ReSukiSU",      label: "🟢 ReSukiSU" },
@@ -56,13 +50,12 @@ async function handleUpdate(update, env) {
       const msg =
         "👋 *Welcome to BootPatcher!*\n\n" +
         "I patch Android `boot.img` files on-demand using GKI kernels from *BruhKernel*.\n\n" +
-        "⚡ *On-Demand Architecture:*\n" +
-        "GitHub Actions runners are only fired up when you upload a file. " +
-        "Zero queue congestion, fair share for everyone!\n\n" +
-        "📋 *How to use:*\n" +
-        "1️⃣ Send your `boot.img` as an uncompressed *File*\n" +
-        "2️⃣ Pick your flavour: *SukiSU, KernelSU-Next, WKSU, ReSukiSU*\n" +
-        "3️⃣ A dedicated runner builds and returns your `patched_boot.img` in ~3 mins!";
+        "⚡ *On-Demand Cloud Patching:*\n" +
+        "• Inspects stock kernel uname & strings\n" +
+        "• Let you pick from 4 flavours (SukiSU, KernelSU-Next, WKSU, ReSukiSU)\n" +
+        "• Dedicated GitHub Actions runner executes patching sequentially\n" +
+        "• Sends back your ready-to-flash `patched_boot.img` in ~3 mins!\n\n" +
+        "📎 *Upload your stock boot.img as a File to get started!*";
       await tgSend(token, "sendMessage", { chat_id: chatId, text: msg, parse_mode: "Markdown" });
       return;
     }
@@ -70,9 +63,9 @@ async function handleUpdate(update, env) {
     if (text.startsWith("/help")) {
       const msg =
         "ℹ️ *BootPatcher Help*\n\n" +
-        "• Send a `boot.img` file to begin patching.\n" +
-        "• Kernels are pulled from: `" + kRepo + "` (android14-6.1)\n" +
-        "• Patching engine: `magiskboot` on clean Linux runners\n" +
+        "• Send a `boot.img` file as an uncompressed document.\n" +
+        "• Available flavours: SukiSU, KernelSU-Next, WKSU, ReSukiSU.\n" +
+        "• Kernels built by: `" + kRepo + "` (android14-6.1).\n" +
         "• Source code: https://github.com/" + repo;
       await tgSend(token, "sendMessage", { chat_id: chatId, text: msg, parse_mode: "Markdown" });
       return;
@@ -89,24 +82,35 @@ async function handleUpdate(update, env) {
     if (!lower.endsWith(".img") && !lower.includes("boot")) {
       await tgSend(token, "sendMessage", {
         chat_id: chatId,
-        text: "⚠️ Please upload a valid `boot.img` file.",
+        text: "⚠️ Please upload a valid `boot.img` file (ends in `.img` or contains `boot`).",
         parse_mode: "Markdown",
       });
       return;
     }
 
-    // Create inline buttons for the 4 flavours with file_id encoded
-    const keyboard = FLAVOURS.map((f) => [
-      {
-        text: f.label,
-        callback_data: `p:${f.id}:${doc.file_id}:${encodeURIComponent(fname)}`,
-      },
-    ]);
-
     const sizeMB = (doc.file_size / (1024 * 1024)).toFixed(2);
+
+    // Query available flavour versions from GitHub API in parallel
+    const versions = await fetchFlavourVersions(kRepo, env.GITHUB_TOKEN);
+
+    // Create buttons showing flavour + respective version
+    const keyboard = BASE_FLAVOURS.map((f) => {
+      const ver = versions[f.id] || "6.1.138";
+      return [
+        {
+          text: `${f.label} (${ver})`,
+          callback_data: `p:${f.id}:${doc.file_id}:${encodeURIComponent(fname)}`,
+        },
+      ];
+    });
+
     const msg =
-      `📁 *Received:* \`${fname}\` (${sizeMB} MB)\n\n` +
-      `Choose which kernel flavour to inject with your stock boot image:`;
+      `🔍 *Boot Image Uploaded*\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `📄 *File:* \`${fname}\`\n` +
+      `💾 *Size:* \`${sizeMB} MB\`\n` +
+      `🌐 *Kernel Source:* \`${kRepo}\`\n\n` +
+      `Select which kernel flavour to patch with:`;
 
     await tgSend(token, "sendMessage", {
       chat_id: chatId,
@@ -131,34 +135,38 @@ async function handleUpdate(update, env) {
 
       await tgSend(token, "answerCallbackQuery", { callback_query_id: cq.id });
 
-      // Edit message to indicate job dispatching
+      // Edit message to indicate runner dispatching
       await tgSend(token, "editMessageText", {
         chat_id: chatId,
         message_id: cq.message.message_id,
         text:
-          `🚀 *Spinning up GitHub Actions Cloud Runner!*\n` +
+          `🚀 *GitHub Actions Runner Dispatched!*\n` +
           `━━━━━━━━━━━━━━━━━━━━\n` +
           `📄 *File:* \`${fname}\`\n` +
           `💉 *Flavour:* \`${flavour}\`\n` +
           `🌐 *Kernel Source:* \`${kRepo}\`\n\n` +
-          `⏳ A dedicated runner has been queued. Unpacking, swapping kernel, and repacking now...\n` +
-          `You will receive \`patched_boot.img\` here in 3–5 minutes!`,
+          `⏳ A dedicated runner is spinning up now:\n` +
+          `1. Unpacking boot image\n` +
+          `2. Parsing kernel strings & verifying banner\n` +
+          `3. Replacing kernel with \`${flavour}\` build\n` +
+          `4. Repacking with magiskboot\n\n` +
+          `You will receive live runner inspection and your final \`patched_boot.img\` in 3–5 minutes! ☕`,
         parse_mode: "Markdown",
       });
 
-      // Get direct file download link from Telegram
+      // Get direct file download link from Telegram API
       const fileRes = await tgSend(token, "getFile", { file_id: fileId });
       if (!fileRes.ok || !fileRes.result.file_path) {
         await tgSend(token, "sendMessage", {
           chat_id: chatId,
-          text: "❌ Failed to retrieve file from Telegram servers. Please re-upload.",
+          text: "❌ Failed to retrieve file from Telegram. Please re-upload.",
         });
         return;
       }
 
       const fileUrl = `https://api.telegram.org/file/bot${token}/${fileRes.result.file_path}`;
 
-      // Dispatch GitHub Actions workflow_dispatch
+      // Dispatch GitHub Actions workflow
       const dispatchOk = await dispatchGitHubAction(env, {
         boot_img_url:   fileUrl,
         chat_id:        String(chatId),
@@ -170,11 +178,45 @@ async function handleUpdate(update, env) {
       if (!dispatchOk) {
         await tgSend(token, "sendMessage", {
           chat_id: chatId,
-          text: "❌ Failed to dispatch GitHub Actions runner. Please check repository permissions.",
+          text: "❌ Failed to dispatch GitHub Actions runner. Please verify repository tokens.",
         });
       }
     }
   }
+}
+
+async function fetchFlavourVersions(kRepo, ghToken) {
+  const versions = { SukiSU: "6.1.138", "KernelSU-Next": "6.1.138", WKSU: "6.1.138", ReSukiSU: "6.1.138" };
+  const headers = {
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "BootPatcher-Cloudflare-Worker",
+  };
+  if (ghToken) {
+    headers["Authorization"] = `Bearer ${ghToken}`;
+  }
+
+  try {
+    const res = await fetch(`https://api.github.com/repos/${kRepo}/actions/artifacts?per_page=50`, { headers });
+    if (res.ok) {
+      const data = await res.json();
+      for (const a of (data.artifacts || [])) {
+        if (a.expired) continue;
+        const name = a.name || "";
+        for (const key of Object.keys(versions)) {
+          if (name.toLowerCase().includes(key.toLowerCase()) && name.toLowerCase().includes("anykernel3")) {
+            const m = name.match(/(\d+\.\d+\.\d+)/);
+            if (m) {
+              versions[key] = m[1];
+            }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Failed querying flavour versions:", e);
+  }
+
+  return versions;
 }
 
 async function tgSend(token, method, payload) {
