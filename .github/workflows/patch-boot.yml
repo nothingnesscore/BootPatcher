@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       boot_img_url:
-        description: "Direct download URL of the stock boot.img"
+        description: "Direct download URL of stock boot.img (from transfer.sh)"
         required: true
         type: string
       chat_id:
-        description: "Telegram chat ID to send the result back to"
+        description: "Telegram chat ID to send result to"
         required: true
         type: string
       kernel_variant:
-        description: "Kernel variant to use from BruhKernel"
+        description: "Kernel flavour to inject"
         required: false
         default: "SukiSU"
         type: choice
@@ -21,171 +21,261 @@ on:
           - "KernelSU-Next"
           - "WKSU"
           - "ReSukiSU"
+      kernel_repo:
+        description: "GitHub repo hosting kernel artifacts (owner/repo)"
+        required: false
+        default: "nothingnesscore/BruhKernel"
+        type: string
+      stock_kernel:
+        description: "Reported stock kernel version string"
+        required: false
+        default: "Unknown"
+        type: string
 
 jobs:
   patch:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Set up environment
+      - name: Install System Dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -q -y wget unzip file curl jq
+          sudo apt-get install -q -y wget unzip file curl jq binutils
 
-      # ── Download magiskboot ──────────────────────────────────────────────────
-      - name: Download magiskboot
+      # ── Telegram Step: Announce start ──────────────────────────────────────
+      - name: Notify Telegram Job Started
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
         run: |
-          wget -q "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk" -O Magisk.apk || true
-          # Fallback: grab a known-good prebuilt magiskboot binary
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            -d text="⚙️ *GitHub Actions runner started!*
+📦 Target Flavour: \`${{ inputs.kernel_variant }}\`
+🌐 Kernel Source: \`${{ inputs.kernel_repo }}\`
+🔗 [Live Run Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+
+      # ── Download magiskboot ──────────────────────────────────────────────
+      - name: Setup magiskboot
+        run: |
           wget -q "https://github.com/ookiineko/magiskboot_build/releases/latest/download/magiskboot_linux_x86_64.tar.gz" -O magiskboot.tar.gz
           tar -xf magiskboot.tar.gz
           chmod +x magiskboot
-          echo "magiskboot version: $(./magiskboot --version 2>&1 || echo 'ready')"
+          echo "magiskboot ready: $(./magiskboot --version 2>&1 || echo 'ready')"
 
-      # ── Download stock boot.img from the URL passed in by the bot ───────────
-      - name: Download stock boot.img
+      # ── Download Stock boot.img ──────────────────────────────────────────
+      - name: Download Stock boot.img
         run: |
-          echo "Downloading boot.img from: ${{ inputs.boot_img_url }}"
+          echo "Downloading from: ${{ inputs.boot_img_url }}"
           wget -q "${{ inputs.boot_img_url }}" -O stock_boot.img
           ls -lh stock_boot.img
           file stock_boot.img
 
-      # ── Grab the latest BruhKernel artifact for android14-6.1 ───────────────
-      - name: Fetch latest BruhKernel kernel Image
+      # ── In-Depth Inspection on Runner ────────────────────────────────────
+      - name: Inspect Stock boot.img
         env:
-          BRUHKERNEL_REPO: "nothingnesscore/BruhKernel"
-          VARIANT: ${{ inputs.kernel_variant }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
         run: |
-          echo "Looking for latest artifact matching: android14-*${VARIANT}*"
+          ./magiskboot unpack stock_boot.img || true
 
-          ARTIFACT_JSON=$(curl -s \
-            "https://api.github.com/repos/${BRUHKERNEL_REPO}/actions/artifacts?per_page=100" \
-            -H "Accept: application/vnd.github+json")
+          STOCK_UNAME="Unknown"
+          ARCH="Unknown"
+          COMPRESSION="Unknown"
 
-          # Find the most recent non-expired AnyKernel3 artifact for the chosen variant and android14-6.1
-          ARTIFACT=$(echo "$ARTIFACT_JSON" | jq -r \
-            --arg variant "$VARIANT" \
-            '[.artifacts[] | select(.name | test("android14.*" + $variant + ".*AnyKernel3")) | select(.expired == false)] | sort_by(.created_at) | last')
-
-          ARTIFACT_NAME=$(echo "$ARTIFACT" | jq -r '.name')
-          ARTIFACT_URL=$(echo "$ARTIFACT" | jq -r '.archive_download_url')
-
-          echo "Found artifact: $ARTIFACT_NAME"
-          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
-          echo "ARTIFACT_URL=$ARTIFACT_URL"   >> $GITHUB_ENV
-
-      - name: Download BruhKernel artifact
-        env:
-          GH_TOKEN: ${{ secrets.BRUHKERNEL_GH_TOKEN }}
-        run: |
-          curl -L -o kernel_artifact.zip \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "$ARTIFACT_URL"
-
-          unzip -q kernel_artifact.zip -d kernel_artifact/
-          ls -la kernel_artifact/
-
-          # AnyKernel3 zip contains the Image inside it
-          AK3_ZIP=$(find kernel_artifact/ -name "*.zip" | head -1)
-          echo "AK3 zip: $AK3_ZIP"
-
-          if [ -n "$AK3_ZIP" ]; then
-            unzip -q "$AK3_ZIP" -d ak3_contents/
-            ls -la ak3_contents/
-          else
-            # Sometimes it's directly extracted
-            cp -r kernel_artifact/ ak3_contents/
+          if [ -f kernel ]; then
+            STOCK_UNAME=$(strings kernel | grep -m1 "Linux version" || echo "Unknown")
+            if strings kernel | grep -q "aarch64"; then
+              ARCH="arm64 (aarch64)"
+            elif strings kernel | grep -q "ARM"; then
+              ARCH="arm32"
+            fi
+            COMPRESSION=$(file kernel | cut -d: -f2- | xargs)
           fi
 
-          # Find the kernel Image file
-          KERNEL_IMAGE=$(find ak3_contents/ -name "Image" -o -name "Image.gz" -o -name "Image.lz4" 2>/dev/null | head -1)
+          echo "STOCK_UNAME=${STOCK_UNAME}" >> $GITHUB_ENV
+          echo "ARCH=${ARCH}" >> $GITHUB_ENV
+          echo "COMPRESSION=${COMPRESSION}" >> $GITHUB_ENV
 
-          if [ -z "$KERNEL_IMAGE" ]; then
-            echo "ERROR: Could not find kernel Image in artifact!"
-            ls -laR ak3_contents/
+          # Clean up temporary unpack before clean patching
+          rm -f kernel ramdisk* dtb* extra second recovery_dtbo
+          ./magiskboot cleanup 2>/dev/null || true
+
+          # Send live inspection result to user
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            -d text="🔬 *Runner Inspection Verified:*
+🐧 *Kernel Banner:* \`${STOCK_UNAME:0:140}\`
+🏗 *Arch:* \`${ARCH}\`
+🗜 *Type:* \`${COMPRESSION}\`
+📥 Fetching matching kernel build from \`${{ inputs.kernel_repo }}\`..."
+
+      # ── Fetch Matching Kernel Artifact ───────────────────────────────────
+      - name: Download Kernel Artifact
+        env:
+          GH_TOKEN: ${{ secrets.BRUHKERNEL_GH_TOKEN || secrets.GITHUB_TOKEN }}
+          KERNEL_REPO: ${{ inputs.kernel_repo }}
+          VARIANT: ${{ inputs.kernel_variant }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
+        run: |
+          echo "Searching artifacts in ${KERNEL_REPO} for variant: ${VARIANT}"
+
+          ARTIFACT_JSON=$(curl -s \
+            "https://api.github.com/repos/${KERNEL_REPO}/actions/artifacts?per_page=100" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json")
+
+          # Select newest non-expired AnyKernel3 artifact containing the variant
+          ARTIFACT=$(echo "$ARTIFACT_JSON" | jq -r \
+            --arg v "$VARIANT" \
+            '[.artifacts[] | select(
+              (.name | test($v; "i")) and
+              (.name | test("AnyKernel3"; "i")) and
+              (.expired == false)
+            )] | sort_by(.created_at) | last')
+
+          ARTIFACT_NAME=$(echo "$ARTIFACT" | jq -r '.name // empty')
+          ARTIFACT_URL=$(echo "$ARTIFACT" | jq -r '.archive_download_url // empty')
+
+          if [ -z "$ARTIFACT_NAME" ]; then
+            echo "No matching artifact found in GitHub Actions. Checking GitHub Releases..."
+            # Fallback to latest GitHub Releases if building via Releases
+            RELEASE_JSON=$(curl -s "https://api.github.com/repos/${KERNEL_REPO}/releases/latest" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json")
+            ASSET_URL=$(echo "$RELEASE_JSON" | jq -r \
+              --arg v "$VARIANT" \
+              '.assets[] | select(.name | test($v; "i")) | .browser_download_url' | head -1)
+
+            if [ -n "$ASSET_URL" ]; then
+              echo "Downloading from release: $ASSET_URL"
+              wget -q "$ASSET_URL" -O kernel_release.zip
+              mkdir -p ak3
+              unzip -q kernel_release.zip -d ak3/
+              ARTIFACT_NAME="Release: $(echo "$RELEASE_JSON" | jq -r .tag_name)"
+            else
+              echo "ERROR: Kernel artifact for ${VARIANT} not found in ${KERNEL_REPO}!"
+              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+                -d chat_id="${CHAT_ID}" \
+                -d parse_mode="Markdown" \
+                -d text="❌ *Error:* No non-expired \`${VARIANT}\` artifact found in \`${KERNEL_REPO}\`. Please ensure the repository has a recent successful workflow run."
+              exit 1
+            fi
+          else
+            echo "Found artifact: ${ARTIFACT_NAME}"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${CHAT_ID}" \
+              -d parse_mode="Markdown" \
+              -d text="📦 *Kernel Build Located:*
+\`${ARTIFACT_NAME}\`
+⚡ Unpacking and replacing kernel..."
+
+            curl -L -o kernel_artifact.zip \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${ARTIFACT_URL}"
+
+            unzip -q kernel_artifact.zip -d artifact_extracted/
+            AK3_ZIP=$(find artifact_extracted/ -name "*.zip" | head -1)
+            mkdir -p ak3
+            if [ -n "$AK3_ZIP" ]; then
+              unzip -q "$AK3_ZIP" -d ak3/
+            else
+              cp -r artifact_extracted/* ak3/
+            fi
+          fi
+
+          echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
+
+          # Extract Image kernel binary
+          KERNEL_BIN=$(find ak3/ \( -name "Image" -o -name "Image.gz" -o -name "Image.lz4" -o -name "Image.gz-dtb" \) | head -1)
+          if [ -z "$KERNEL_BIN" ]; then
+            echo "ERROR: Kernel Image binary missing in artifact package!"
+            ls -laR ak3/
             exit 1
           fi
 
-          echo "Found kernel image: $KERNEL_IMAGE"
-          cp "$KERNEL_IMAGE" new_kernel
+          echo "Kernel image located at: $KERNEL_BIN"
+          cp "$KERNEL_BIN" new_kernel
           ls -lh new_kernel
 
-      # ── Read kernel version from both old and new ───────────────────────────
-      - name: Extract kernel version info
+          NEW_UNAME=$(strings new_kernel | grep -m1 "Linux version" || echo "Custom GKI")
+          echo "NEW_UNAME=${NEW_UNAME}" >> $GITHUB_ENV
+
+      # ── Unpack, Swap, and Repack ─────────────────────────────────────────
+      - name: Patch boot.img using magiskboot
         run: |
-          echo "=== Stock boot.img info ==="
-          ./magiskboot unpack stock_boot.img
-          if [ -f kernel ]; then
-            STOCK_VER=$(strings kernel | grep -m1 "Linux version" || echo "unknown")
-            echo "Stock kernel: $STOCK_VER"
-            echo "STOCK_VER=$STOCK_VER" >> $GITHUB_ENV
-          fi
-          # Clean up extracted files (we'll re-unpack cleanly)
-          rm -f kernel ramdisk* dtb* extra
-          ./magiskboot cleanup 2>/dev/null || true
+          mkdir -p patch_env
+          cp stock_boot.img patch_env/boot.img
+          cp new_kernel patch_env/Image
+          cd patch_env
 
-          echo "=== New kernel info ==="
-          NEW_VER=$(strings new_kernel | grep -m1 "Linux version" || echo "unknown")
-          echo "New kernel: $NEW_VER"
-          echo "NEW_VER=$NEW_VER" >> $GITHUB_ENV
-
-      # ── Patch: unpack → swap kernel → repack ────────────────────────────────
-      - name: Patch boot.img
-        run: |
-          mkdir -p workdir
-          cp stock_boot.img workdir/boot.img
-          cp new_kernel      workdir/Image
-          cd workdir
-
-          echo "Unpacking boot.img..."
+          echo "1. Unpacking stock boot.img..."
           ../magiskboot unpack boot.img
 
-          echo "Swapping kernel..."
-          [ -f kernel ] && rm kernel
+          echo "2. Replacing old kernel..."
+          [ -f kernel ] && rm -f kernel
           cp Image kernel
 
-          echo "Repacking boot.img..."
+          echo "3. Repacking boot.img..."
           ../magiskboot repack boot.img
 
-          ls -lh new-boot.img
-          echo "Patching complete!"
+          if [ ! -f new-boot.img ]; then
+            echo "ERROR: new-boot.img was not generated!"
+            exit 1
+          fi
 
-      # ── Upload patched image to transfer.sh and notify via Telegram ─────────
-      - name: Send patched boot.img to Telegram
+          ls -lh new-boot.img
+          echo "Patching successful!"
+
+      # ── Send Patched Image to Telegram ───────────────────────────────────
+      - name: Upload Patched boot.img to Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID:            ${{ inputs.chat_id }}
+          CHAT_ID: ${{ inputs.chat_id }}
         run: |
-          PATCHED="workdir/new-boot.img"
-          ARTIFACT_NAME="${{ env.ARTIFACT_NAME }}"
-          STOCK_VER="${{ env.STOCK_VER }}"
-          NEW_VER="${{ env.NEW_VER }}"
+          STOCK_S=$(echo "${{ env.STOCK_UNAME }}" | grep -oP "Linux version \K\S+" || echo "${{ inputs.stock_kernel }}")
+          NEW_S=$(echo "${{ env.NEW_UNAME }}" | grep -oP "Linux version \K\S+" || echo "Patched GKI")
 
-          CAPTION="✅ *Boot image patched successfully!*
+          CAPTION="🎉 *Your Patched boot.img is Ready!*
+━━━━━━━━━━━━━━━━━━━━
+📦 *Flavour:* \`${{ inputs.kernel_variant }}\`
+🌐 *Source:* \`${{ inputs.kernel_repo }}\`
+🏷 *Artifact:* \`${{ env.ARTIFACT_NAME }}\`
+🔄 *Stock Kernel:* \`${STOCK_S}\`
+🆕 *New Kernel:* \`${NEW_S}\`
+🏗 *Arch:* \`${{ env.ARCH }}\`
 
-📦 *Kernel used:* \`${ARTIFACT_NAME}\`
-🔄 *Stock kernel:* \`${STOCK_VER}\`
-🆕 *New kernel:*  \`${NEW_VER}\`
+📋 *Flashing Instructions (Newbie Friendly):*
+1. Reboot your phone into Recovery (TWRP / OrangeFox) or Fastboot.
+2. If using Recovery:
+   • Select *Install* ➔ *Install Image*
+   • Choose \`patched_boot.img\`
+   • Flash to *Boot* partition
+3. If using Fastboot on PC:
+   \`fastboot flash boot patched_boot.img\`
+4. Reboot system and enjoy your rooted/custom kernel! 🚀"
 
-_Powered by BootPatcher + BruhKernel_"
-
-          echo "Sending patched boot.img back to Telegram chat ${CHAT_ID}..."
           curl -s \
             -F "chat_id=${CHAT_ID}" \
-            -F "document=@${PATCHED};filename=patched_boot.img" \
+            -F "document=@patch_env/new-boot.img;filename=patched_boot.img" \
             -F "caption=${CAPTION}" \
             -F "parse_mode=Markdown" \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
 
-      # ── Notify on failure ────────────────────────────────────────────────────
-      - name: Notify Telegram on failure
+      # ── Failure Handler ──────────────────────────────────────────────────
+      - name: Telegram Failure Notification
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID:            ${{ inputs.chat_id }}
+          CHAT_ID: ${{ inputs.chat_id }}
         run: |
-          curl -s \
-            -F "chat_id=${CHAT_ID}" \
-            -F "text=❌ Boot patching failed! Check the GitHub Actions log for details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${CHAT_ID}" \
+            -d parse_mode="Markdown" \
+            -d text="❌ *Patching failed on GitHub Actions.*
+Please check the run logs for exact details:
+https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
