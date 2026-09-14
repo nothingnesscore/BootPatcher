@@ -1,0 +1,191 @@
+name: Patch Boot Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      boot_img_url:
+        description: "Direct download URL of the stock boot.img"
+        required: true
+        type: string
+      chat_id:
+        description: "Telegram chat ID to send the result back to"
+        required: true
+        type: string
+      kernel_variant:
+        description: "Kernel variant to use from BruhKernel"
+        required: false
+        default: "SukiSU"
+        type: choice
+        options:
+          - "SukiSU"
+          - "KernelSU-Next"
+          - "WKSU"
+          - "ReSukiSU"
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up environment
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -q -y wget unzip file curl jq
+
+      # ── Download magiskboot ──────────────────────────────────────────────────
+      - name: Download magiskboot
+        run: |
+          wget -q "https://github.com/topjohnwu/Magisk/releases/latest/download/Magisk.apk" -O Magisk.apk || true
+          # Fallback: grab a known-good prebuilt magiskboot binary
+          wget -q "https://github.com/ookiineko/magiskboot_build/releases/latest/download/magiskboot_linux_x86_64.tar.gz" -O magiskboot.tar.gz
+          tar -xf magiskboot.tar.gz
+          chmod +x magiskboot
+          echo "magiskboot version: $(./magiskboot --version 2>&1 || echo 'ready')"
+
+      # ── Download stock boot.img from the URL passed in by the bot ───────────
+      - name: Download stock boot.img
+        run: |
+          echo "Downloading boot.img from: ${{ inputs.boot_img_url }}"
+          wget -q "${{ inputs.boot_img_url }}" -O stock_boot.img
+          ls -lh stock_boot.img
+          file stock_boot.img
+
+      # ── Grab the latest BruhKernel artifact for android14-6.1 ───────────────
+      - name: Fetch latest BruhKernel kernel Image
+        env:
+          BRUHKERNEL_REPO: "nothingnesscore/BruhKernel"
+          VARIANT: ${{ inputs.kernel_variant }}
+        run: |
+          echo "Looking for latest artifact matching: android14-*${VARIANT}*"
+
+          ARTIFACT_JSON=$(curl -s \
+            "https://api.github.com/repos/${BRUHKERNEL_REPO}/actions/artifacts?per_page=100" \
+            -H "Accept: application/vnd.github+json")
+
+          # Find the most recent non-expired AnyKernel3 artifact for the chosen variant and android14-6.1
+          ARTIFACT=$(echo "$ARTIFACT_JSON" | jq -r \
+            --arg variant "$VARIANT" \
+            '[.artifacts[] | select(.name | test("android14.*" + $variant + ".*AnyKernel3")) | select(.expired == false)] | sort_by(.created_at) | last')
+
+          ARTIFACT_NAME=$(echo "$ARTIFACT" | jq -r '.name')
+          ARTIFACT_URL=$(echo "$ARTIFACT" | jq -r '.archive_download_url')
+
+          echo "Found artifact: $ARTIFACT_NAME"
+          echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+          echo "ARTIFACT_URL=$ARTIFACT_URL"   >> $GITHUB_ENV
+
+      - name: Download BruhKernel artifact
+        env:
+          GH_TOKEN: ${{ secrets.BRUHKERNEL_GH_TOKEN }}
+        run: |
+          curl -L -o kernel_artifact.zip \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "$ARTIFACT_URL"
+
+          unzip -q kernel_artifact.zip -d kernel_artifact/
+          ls -la kernel_artifact/
+
+          # AnyKernel3 zip contains the Image inside it
+          AK3_ZIP=$(find kernel_artifact/ -name "*.zip" | head -1)
+          echo "AK3 zip: $AK3_ZIP"
+
+          if [ -n "$AK3_ZIP" ]; then
+            unzip -q "$AK3_ZIP" -d ak3_contents/
+            ls -la ak3_contents/
+          else
+            # Sometimes it's directly extracted
+            cp -r kernel_artifact/ ak3_contents/
+          fi
+
+          # Find the kernel Image file
+          KERNEL_IMAGE=$(find ak3_contents/ -name "Image" -o -name "Image.gz" -o -name "Image.lz4" 2>/dev/null | head -1)
+
+          if [ -z "$KERNEL_IMAGE" ]; then
+            echo "ERROR: Could not find kernel Image in artifact!"
+            ls -laR ak3_contents/
+            exit 1
+          fi
+
+          echo "Found kernel image: $KERNEL_IMAGE"
+          cp "$KERNEL_IMAGE" new_kernel
+          ls -lh new_kernel
+
+      # ── Read kernel version from both old and new ───────────────────────────
+      - name: Extract kernel version info
+        run: |
+          echo "=== Stock boot.img info ==="
+          ./magiskboot unpack stock_boot.img
+          if [ -f kernel ]; then
+            STOCK_VER=$(strings kernel | grep -m1 "Linux version" || echo "unknown")
+            echo "Stock kernel: $STOCK_VER"
+            echo "STOCK_VER=$STOCK_VER" >> $GITHUB_ENV
+          fi
+          # Clean up extracted files (we'll re-unpack cleanly)
+          rm -f kernel ramdisk* dtb* extra
+          ./magiskboot cleanup 2>/dev/null || true
+
+          echo "=== New kernel info ==="
+          NEW_VER=$(strings new_kernel | grep -m1 "Linux version" || echo "unknown")
+          echo "New kernel: $NEW_VER"
+          echo "NEW_VER=$NEW_VER" >> $GITHUB_ENV
+
+      # ── Patch: unpack → swap kernel → repack ────────────────────────────────
+      - name: Patch boot.img
+        run: |
+          mkdir -p workdir
+          cp stock_boot.img workdir/boot.img
+          cp new_kernel      workdir/Image
+          cd workdir
+
+          echo "Unpacking boot.img..."
+          ../magiskboot unpack boot.img
+
+          echo "Swapping kernel..."
+          [ -f kernel ] && rm kernel
+          cp Image kernel
+
+          echo "Repacking boot.img..."
+          ../magiskboot repack boot.img
+
+          ls -lh new-boot.img
+          echo "Patching complete!"
+
+      # ── Upload patched image to transfer.sh and notify via Telegram ─────────
+      - name: Send patched boot.img to Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID:            ${{ inputs.chat_id }}
+        run: |
+          PATCHED="workdir/new-boot.img"
+          ARTIFACT_NAME="${{ env.ARTIFACT_NAME }}"
+          STOCK_VER="${{ env.STOCK_VER }}"
+          NEW_VER="${{ env.NEW_VER }}"
+
+          CAPTION="✅ *Boot image patched successfully!*
+
+📦 *Kernel used:* \`${ARTIFACT_NAME}\`
+🔄 *Stock kernel:* \`${STOCK_VER}\`
+🆕 *New kernel:*  \`${NEW_VER}\`
+
+_Powered by BootPatcher + BruhKernel_"
+
+          echo "Sending patched boot.img back to Telegram chat ${CHAT_ID}..."
+          curl -s \
+            -F "chat_id=${CHAT_ID}" \
+            -F "document=@${PATCHED};filename=patched_boot.img" \
+            -F "caption=${CAPTION}" \
+            -F "parse_mode=Markdown" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+
+      # ── Notify on failure ────────────────────────────────────────────────────
+      - name: Notify Telegram on failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID:            ${{ inputs.chat_id }}
+        run: |
+          curl -s \
+            -F "chat_id=${CHAT_ID}" \
+            -F "text=❌ Boot patching failed! Check the GitHub Actions log for details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"

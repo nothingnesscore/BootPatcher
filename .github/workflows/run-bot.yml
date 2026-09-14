@@ -1,0 +1,32 @@
+name: Run Telegram Bot
+
+on:
+  workflow_dispatch:       # start manually
+  push:
+    branches: [main]
+    paths:
+      - 'bot/bot.py'
+      - 'bot/requirements.txt'
+      - '.github/workflows/run-bot.yml'
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350   # GH Actions max is 6h; re-trigger if needed
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r bot/requirements.txt
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          GITHUB_TOKEN:       ${{ secrets.BOT_GH_TOKEN }}
+          GITHUB_REPO:        ${{ github.repository }}
+        run: python bot/bot.py
