@@ -1,108 +1,109 @@
 # BootPatcher 🔧
 
-> A **GitHub Actions-powered Telegram bot** that patches your stock `boot.img` with the latest [BruhKernel](https://github.com/nothingnesscore/BruhKernel) (android14-6.1). No PC needed — just send your file.
+> An automated, **GitHub Actions-powered Telegram bot** & toolkit that inspects and patches your stock Android `boot.img` with custom GKI kernels from [BruhKernel](https://github.com/nothingnesscore/BruhKernel) (or your own custom kernel fork).  
+> Zero setup required on your device — just send your boot image to the bot!
 
 ---
 
-## 🚀 How to get your patched boot.img (newbie guide)
+## 📖 Newbie Guide: Step-by-Step to a Patched Boot Image
 
-> ⏱ Takes about **5–7 minutes** total
+If you have never patched or flashed a boot image before, follow these simple steps:
 
-**Step 1** — Open the bot on Telegram  
-→ Search for **@umbromomento_bot** or click the link your device came with
+### 1️⃣ Extract your stock `boot.img`
+* **From Fastboot / Recovery ROM:** Download the official stock ROM for your phone model and extract `boot.img` (or use `payload-dumper-go` if it is inside `payload.bin`).
+* **From Rooted Device / Termux:** You can dump your current boot partition directly:
+  ```bash
+  su -c "dd if=/dev/block/by-name/boot$(getprop ro.boot.slot_suffix) of=/sdcard/boot.img"
+  ```
 
-**Step 2** — Send your `boot.img` as a **File**  
-→ In Telegram, tap the 📎 paperclip → pick **File** (NOT photo/video)  
-→ Navigate to your `boot.img` and send it
+### 2️⃣ Send your `boot.img` to the Telegram Bot
+1. Open the bot on Telegram: **[@umbromomento_bot](https://t.me/umbromomento_bot)**
+2. Tap the 📎 **Attachment (Paperclip)** icon.
+3. Select **File** ➔ browse and send your `boot.img` *(important: do NOT send as compressed photo/media)*.
 
-**Step 3** — Read the analysis the bot shows you  
-→ The bot will tell you your stock kernel version, arch, compression type
+### 3️⃣ Review Boot Image Inspection
+The bot will immediately inspect your boot image and display:
+* 🐧 **Stock Linux Kernel Version & Banner**
+* 🏗 **Architecture** (`arm64`, `arm32`, `x86_64`)
+* 🗜 **Compression Format** (`gzip`, `lz4`, `zstd`, `raw`)
+* 📅 **OS Patch Level** & Header Format (`Android Boot v2/v3/v4`)
 
-**Step 4** — Pick a kernel flavour  
-→ Tap one of the 4 buttons: SukiSU (recommended), KernelSU-Next, WKSU, or ReSukiSU
+### 4️⃣ Select your Kernel Flavour
+Tap one of the interactive buttons displaying the available kernel builds:
+* 🟣 **SukiSU Ultra** — SukiSU with latest SUSFS, NoMount & performance patches *(recommended)*.
+* 🔵 **KernelSU-Next** — KernelSU-Next branch with SUSFS integration.
+* 🟤 **WKSU** — Wild KernelSU implementation.
+* 🟢 **ReSukiSU** — Alternative SukiSU rebuild.
 
-**Step 5** — Wait for GitHub Actions to do the work  
-→ The bot will message you as it progresses  
-→ When done, it sends back your **patched_boot.img** directly
+*(Each button shows the exact version matched, e.g. `🟣 SukiSU Ultra (6.1.138)`)*
 
-**Step 6** — Flash the patched boot.img  
-→ Boot into recovery (TWRP / OrangeFox)  
-→ Flash `patched_boot.img` via **Install → Install Image → Boot Partition**  
-→ Reboot and enjoy your patched kernel! 🎉
+### 5️⃣ Cloud Patching via GitHub Actions
+* The bot stages your image and triggers a dedicated GitHub Actions cloud runner.
+* Live runner updates are sent to your chat while `magiskboot` unpacks, replaces the kernel binary, and repacks.
+* Within **3 to 5 minutes**, the bot delivers your ready-to-flash `patched_boot.img`!
 
----
-
-## How it works (technical)
-
-```
-You → Send boot.img to bot
-        ↓
-Bot → Analyses kernel version, arch, compression locally
-Bot → Shows you the analysis + flavour picker buttons
-        ↓
-You → Pick a kernel flavour
-        ↓
-Bot → Uploads boot.img to temporary hosting
-Bot → Triggers GitHub Actions patch workflow
-        ↓
-GH Actions → Downloads latest BruhKernel (android14-6.1) artifact
-           → magiskboot unpack stock boot.img
-           → Swaps old kernel → new kernel
-           → magiskboot repack
-        ↓
-Bot → Sends patched_boot.img back to you on Telegram
-```
-
----
-
-## Kernel flavours
-
-All kernels from [nothingnesscore/BruhKernel](https://github.com/nothingnesscore/BruhKernel), android14-6.1:
-
-| Flavour | Description |
-|---------|-------------|
-| 🟣 **SukiSU** *(recommended)* | SukiSU Ultra + SUSFS + NoMount |
-| 🔵 **KernelSU-Next** | KernelSU Next + SUSFS |
-| 🟤 **WKSU** | Wild KernelSU |
-| 🟢 **ReSukiSU** | Re-compiled SukiSU |
+### 6️⃣ Flash to Device
+* **Via Fastboot (PC):**
+  ```bash
+  adb reboot bootloader
+  fastboot flash boot patched_boot.img
+  fastboot reboot
+  ```
+* **Via Custom Recovery (TWRP / OrangeFox):**
+  1. Copy `patched_boot.img` to internal storage.
+  2. In TWRP: **Install** ➔ **Install Image** ➔ select `patched_boot.img` ➔ check **Boot** partition ➔ Swipe to flash.
+  3. Reboot system!
 
 ---
 
-## Use your own kernel fork (for developers)
+## 🌐 Universal Fork Support (For Developers)
 
-If you maintain your own BruhKernel fork:
+Anyone can fork `nothingnesscore/BruhKernel` or build custom kernels and patch stock boot images using this tool:
 
-1. Fork [nothingnesscore/BruhKernel](https://github.com/nothingnesscore/BruhKernel)
-2. Build your kernel — it should publish AnyKernel3 artifacts with the same naming pattern
-3. In the bot, after sending your boot.img, tap **⚙️ Custom kernel repo**
-4. Type your repo as `owner/repo` (e.g. `myuser/MyKernelFork`)
-5. Pick your flavour and patch!
-
----
-
-## Coming soon 🚧
-
-| Feature | Status |
-|---------|--------|
-| Android app (root required) | 🔜 Soon |
-| Auto-detect matching kernel version from boot.img | 🔜 Soon |
-| Support for more android versions / branches | 🔜 Soon |
+1. **Fork BruhKernel:** Fork [nothingnesscore/BruhKernel](https://github.com/nothingnesscore/BruhKernel) to your own GitHub account.
+2. **Build Your Kernel:** Run your custom workflow in your fork to build your kernel variants.
+3. **Point the Bot to Your Fork:**
+   * In Telegram, send `/repo` or click **⚙️ Kernel Repo** after uploading your image.
+   * Send your GitHub repository in `username/repo` format (e.g. `myuser/BruhKernel`).
+   * The bot will automatically query your fork's artifacts and patch images using your builds!
+4. **Zero Server Load:** Everything runs on GitHub Actions runners, keeping costs and hosting load at absolute zero.
 
 ---
 
-## Credits
+## 📱 [SOON] Rooted Android APK Plan: `BootPatcher Mobile`
 
-- 🔧 **Original patching concept** — [Dayto0/BootKernelChanger](https://github.com/Dayto0/BootKernelChanger) by **@dayt0**  
-- 🐧 **Kernel builds** — [nothingnesscore/BruhKernel](https://github.com/nothingnesscore/BruhKernel)  
-- ⚙️ **Repacking engine** — [magiskboot](https://github.com/topjohnwu/Magisk) by topjohnwu
+We are planning an on-device Android application for rooted users to eliminate PC/Telegram steps entirely:
+
+* **Tag:** `[SOON]`
+* **Target OS:** Android 11+ (Root required via KernelSU / APatch / Magisk)
+* **Architecture Blueprint:**
+  1. **Direct Partition Dumper:** Uses `libsu` root shell to automatically locate and dump the active slot's boot partition (`/dev/block/by-name/boot_a` or `boot_b`).
+  2. **On-Device Kernel Inspection:** Reads `/proc/version` and parses the local boot image header to display current kernel banner, architecture, and patch level.
+  3. **BruhKernel Cloud Sync:** Queries the BruhKernel API for the latest builds matching the active Android version and kernel branch (e.g. `android14-6.1`).
+  4. **Embedded On-Device `magiskboot` Engine:** Bundles pre-compiled ARM64 `magiskboot` directly in the APK assets. Unpacks the partition, substitutes the `Image` kernel, and repacks locally in seconds.
+  5. **Direct In-App Flashing:** One-tap flashing to the inactive slot (OTA style) or active boot partition with automatic backup creation to prevent bootloops.
 
 ---
 
-## Troubleshooting
+## 💻 Desktop Tool: BootKernelChanger (English + Auto Dark Mode)
 
-| Problem | Fix |
-|---------|-----|
-| Bot not responding | It may be restarting (~6h cycle), try again in a minute |
-| "No artifact found" | The kernel repo hasn't built recently, or wrong repo name |
-| Patch fails | Tap the Actions link the bot sends and check logs |
-| Wrong boot partition after flash | Make sure you're flashing to the correct slot (A/B) |
+For users who prefer offline patching on Windows PC:
+* Located in [`tools/BootKernelChanger/`](tools/BootKernelChanger/).
+* **Features:**
+  * Native English user interface.
+  * **Auto Dark Mode:** Detects Windows 10/11 system light/dark theme using `darkdetect` and applies the Sun Valley theme (`sv-ttk`).
+  * Standalone single-file executable `BootKernelChanger_EN.exe` bundled with `magiskboot.exe`.
+* **Building from source:**
+  ```powershell
+  cd tools/BootKernelChanger
+  pip install sv-ttk darkdetect pyinstaller
+  pyinstaller --noconsole --onefile --icon=icon.ico --add-data "magiskboot.exe;." -n BootKernelChanger_EN app.py
+  ```
+
+---
+
+## 🏆 Credits & Acknowledgements
+
+* **[Dayto0](https://github.com/Dayto0)** — Huge thanks and credits to **Dayto0** for the original [BootKernelChanger](https://github.com/Dayto0/BootKernelChanger) idea and concept of replacing kernel binaries inside `boot.img` using `magiskboot`.
+* **[nothingnesscore / BruhKernel](https://github.com/nothingnesscore/BruhKernel)** — Automated GKI kernel build pipeline with SukiSU, SUSFS, and performance optimizations.
+* **[topjohnwu / Magisk](https://github.com/topjohnwu/Magisk)** — `magiskboot` utility for Android boot image unpacking and repacking.
