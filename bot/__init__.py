@@ -1,0 +1,3 @@
+"""
+BootPatcher bot package
+"""

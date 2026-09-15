@@ -8,9 +8,16 @@ import sys
 import asyncio
 from telethon import TelegramClient
 
-# Add project root to sys.path for importing bot modules
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from bot.tg_progress import TelegramProgressReporter, delete_message, edit_message
+# Add project root and module dir to sys.path for robust importing
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_current_dir)
+sys.path.insert(0, _parent_dir)
+sys.path.insert(0, _current_dir)
+
+try:
+    from bot.tg_progress import TelegramProgressReporter, delete_message, edit_message
+except ImportError:
+    from tg_progress import TelegramProgressReporter, delete_message, edit_message
 
 API_ID = int(os.environ.get("TELEGRAM_API_ID", "2040"))
 API_HASH = os.environ.get("TELEGRAM_API_HASH", "b18441a1ff607e10a989891a5462e627")
