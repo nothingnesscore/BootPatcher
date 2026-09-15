@@ -86,9 +86,9 @@ jobs:
             python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "⚡ *Building Your Patched Boot Image*
           ━━━━━━━━━━━━━━━━━━━━
           📦 *Flavour:* \`${{ inputs.kernel_variant }}\`
-          📱 *Target Device:* \`${{ inputs.device_target || 'peridot' }}\`
-          🔄 *Progress:* \`[■□□□□□] 15%\`
-          ⏳ *Status:* Cloud runner started. Streaming boot image via MTProto...
+          📱 *Target Device:* \`${{ inputs.device_target || 'peridot' }}\` / GKI 2.0
+          🔄 *Progress:* \`[■■□□□□□□□□] 20%\`
+          ⏳ *Status:* Cloud runner online. Initializing MTProto pipeline...
           🔗 [Live Runner Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           fi
 
@@ -96,10 +96,12 @@ jobs:
       - name: Download Stock boot.img
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          STATUS_ID: ${{ inputs.status_message_id }}
         run: |
           if [ -n "${{ inputs.message_id }}" ]; then
             echo "Downloading from Telegram MTProto (chat: ${{ inputs.chat_id }}, msg: ${{ inputs.message_id }})..."
-            python3 bot/download_tg.py "${{ inputs.chat_id }}" "${{ inputs.message_id }}" stock_boot.img
+            python3 bot/download_tg.py "${CHAT_ID}" "${{ inputs.message_id }}" stock_boot.img "${STATUS_ID}" "${{ inputs.kernel_variant }}" "${{ inputs.device_target || 'peridot' }}"
           elif [ -n "${{ inputs.boot_img_url }}" ]; then
             echo "Downloading from URL: ${{ inputs.boot_img_url }}"
             wget -q "${{ inputs.boot_img_url }}" -O stock_boot.img
@@ -167,8 +169,8 @@ jobs:
           🗜️ *Boot Format:* \`Boot ${FORMAT}\`
           ━━━━━━━━━━━━━━━━━━━━
           📦 *Target Flavour:* \`${{ inputs.kernel_variant }}\`
-          🔄 *Progress:* \`[■■■□□□] 50%\`
-          ⏳ *Status:* Fetching & injecting BruhKernel build...
+          🔄 *Progress:* \`[■■■■■□□□□□] 50%\`
+          ⏳ *Status:* Stock boot inspected! Querying BruhKernel builds...
           🔗 [Live Runner Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           fi
 
@@ -279,6 +281,20 @@ jobs:
           echo "NEW_UNAME=${NEW_UNAME}" >> $GITHUB_ENV
           echo "NEW_UNAME_SHORT=${NEW_UNAME_SHORT}" >> $GITHUB_ENV
 
+          if [ -n "${STATUS_ID}" ]; then
+            python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "⚡ *Building Your Patched Boot Image*
+          ━━━━━━━━━━━━━━━━━━━━
+          📱 *Device Profile:* \`Poco F6 (peridot) / GKI 2.0\`
+          🐧 *Stock Kernel:* \`Linux ${KERNEL_VER}\`
+          🆕 *BruhKernel:* \`Linux ${NEW_UNAME_SHORT}\`
+          🤖 *Android Version:* \`Android ${OS_VER}\`
+          ━━━━━━━━━━━━━━━━━━━━
+          📦 *Target Flavour:* \`${{ inputs.kernel_variant }}\`
+          🔄 *Progress:* \`[■■■■■■■□□□] 70%\`
+          ⏳ *Status:* Kernel artifact fetched! Repacking boot image...
+          🔗 [Live Runner Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          fi
+
       # ── Unpack, Swap, and Repack ─────────────────────────────────────────
       - name: Patch boot.img using magiskboot
         env:
@@ -315,39 +331,37 @@ jobs:
           ━━━━━━━━━━━━━━━━━━━━
           📱 *Device Profile:* \`Poco F6 (peridot) / GKI 2.0\`
           🐧 *Kernel Version:* \`Linux ${{ env.KERNEL_VER }}\`
+          🆕 *BruhKernel:* \`Linux ${{ env.NEW_UNAME_SHORT }}\`
           🤖 *Android Version:* \`Android ${{ env.OS_VER }}\`
           🛡️ *Patch Level:* \`${{ env.PATCH_LVL }}\`
           ━━━━━━━━━━━━━━━━━━━━
           📦 *Target Flavour:* \`${{ inputs.kernel_variant }}\`
-          🔄 *Progress:* \`[■■■■■□] 85%\`
-          ⏳ *Status:* Repacked successfully! Uploading to Telegram..."
+          🔄 *Progress:* \`[■■■■■■■■□□] 85%\`
+          ⏳ *Status:* Repacked successfully! Starting MTProto upload...
+          🔗 [Live Runner Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           fi
 
-      # ── Upload Patched Image to Telegram & Complete Status Message ─────────
-      - name: Upload Patched boot.img & Complete Status
+      # ── Upload Patched Image to Telegram & Clean Status Message ───────────
+      - name: Upload Patched boot.img & Deliver to Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
           STATUS_ID: ${{ inputs.status_message_id }}
         run: |
-          if [ -n "${STATUS_ID}" ]; then
-            python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "🎉 *Your Patched Boot Image is Ready!*
-          ━━━━━━━━━━━━━━━━━━━━
-          📱 *Device Profile:* \`Poco F6 (peridot) / GKI 2.0\`
-          🐧 *Stock Kernel:* \`Linux ${{ env.KERNEL_VER }}\`
-          🆕 *BruhKernel:* \`Linux ${{ env.NEW_UNAME_SHORT }}\`
-          🤖 *Android Version:* \`Android ${{ env.OS_VER }}\`
-          🛡️ *Patch Level:* \`${{ env.PATCH_LVL }}\`
-          📦 *Flavour:* \`${{ inputs.kernel_variant }}\`
-          🏷️ *Artifact:* \`${{ env.ARTIFACT_NAME }}\`
-          ━━━━━━━━━━━━━━━━━━━━
-          ✅ *Status:* Complete! Delivering modified boot image below ⬇️"
-          fi
+          printf '🎉 *Patched Boot Image Ready!*\n━━━━━━━━━━━━━━━━━━━━\n📱 *Device Profile:* Poco F6 (`%s`) / GKI 2.0\n🐧 *Stock Kernel:* `Linux %s`\n🆕 *BruhKernel:* `Linux %s`\n🤖 *Android Version:* `Android %s`\n🛡️ *Patch Level:* `%s`\n🗜️ *Boot Format:* `Boot %s`\n📦 *Flavour:* `%s`\n🏷️ *Artifact:* `%s`\n━━━━━━━━━━━━━━━━━━━━\n📋 *Quick Flashing Steps:*\n• TWRP/OrangeFox: Install ➔ Install Image ➔ Select file ➔ Flash to `Boot`\n• Fastboot: `fastboot flash boot patched_boot.img`\n🔗 [Runner Log](https://github.com/%s/actions/runs/%s)\n' \
+            "${{ inputs.device_target || 'peridot' }}" \
+            "${{ env.KERNEL_VER }}" \
+            "${{ env.NEW_UNAME_SHORT }}" \
+            "${{ env.OS_VER }}" \
+            "${{ env.PATCH_LVL }}" \
+            "${{ env.FORMAT }}" \
+            "${{ inputs.kernel_variant }}" \
+            "${{ env.ARTIFACT_NAME }}" \
+            "${{ github.repository }}" \
+            "${{ github.run_id }}" > caption.txt
 
-          printf '🎉 *Patched Boot Image*\n━━━━━━━━━━━━━━━━━━━━\n📦 *Flavour:* %s\n🐧 *Kernel:* Linux %s\n📱 *Device:* Poco F6 (peridot) / GKI 2.0\n\n📋 *Quick Flashing Steps:*\n• TWRP/OrangeFox: Install ➔ Install Image ➔ Select file ➔ Flash to Boot\n• Fastboot: fastboot flash boot patched_boot.img\n' "${{ inputs.kernel_variant }}" "${{ env.NEW_UNAME_SHORT }}" > caption.txt
-
-          echo "Uploading via MTProto..."
-          python3 bot/upload_tg.py "${CHAT_ID}" patch_env/new-boot.img caption.txt || {
+          echo "Uploading via MTProto with dynamic progress updates..."
+          python3 bot/upload_tg.py "${CHAT_ID}" patch_env/new-boot.img caption.txt "${STATUS_ID}" "${{ inputs.kernel_variant }}" "${{ inputs.device_target || 'peridot' }}" || {
             echo "MTProto upload failed, falling back to Bot API sendDocument..."
             curl -s \
               -F "chat_id=${CHAT_ID}" \
@@ -355,15 +369,18 @@ jobs:
               -F "caption=$(cat caption.txt)" \
               -F "parse_mode=Markdown" \
               "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+            if [ -n "${STATUS_ID}" ]; then
+              python3 bot/tg_progress.py delete "${CHAT_ID}" "${STATUS_ID}" || true
+            fi
           }
 
-      # ── Upload Patched Artifact to GitHub Actions ────────────────────────
+      # ── Upload Patched Artifact to GitHub Actions (1-Day Retention) ───────
       - name: Archive Patched boot.img Artifact
         uses: actions/upload-artifact@v4
         with:
           name: patched_boot_${{ inputs.kernel_variant }}_${{ github.run_id }}
           path: patch_env/new-boot.img
-          retention-days: 7
+          retention-days: 1
 
       # ── Failure Handler ──────────────────────────────────────────────────
       - name: Telegram Failure Notification
@@ -383,3 +400,20 @@ jobs:
               -d parse_mode="Markdown" \
               --data-urlencode "text=${FAIL_MSG}"
           fi
+
+      # ── Clean Cache & Environment (Always Runs) ──────────────────────────
+      - name: Clean Cache & Environment
+        if: always()
+        run: |
+          echo "🧹 Performing post-run cache and environment cleanup..."
+          # 1. Clean Telegram / Telethon session files
+          rm -f *.session *.session-journal *.session* 2>/dev/null || true
+          # 2. Clean boot images, unpacked binaries, and temporary scripts
+          rm -f stock_boot.img new_kernel caption.txt ./magiskboot 2>/dev/null || true
+          # 3. Clean intermediate workspaces & archives
+          rm -rf patch_env ak3 artifact_extracted kernel_artifact.zip kernel_release.zip 2>/dev/null || true
+          # 4. Clean runner temp directory and pip cache
+          rm -rf /tmp/bkc_* /tmp/telethon* 2>/dev/null || true
+          pip3 cache purge 2>/dev/null || true
+          echo "✅ Post-run cache cleanup complete. Current runner directory status:"
+          ls -la

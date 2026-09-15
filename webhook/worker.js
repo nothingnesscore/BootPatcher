@@ -149,7 +149,7 @@ async function handleUpdate(update, env) {
           `━━━━━━━━━━━━━━━━━━━━\n` +
           `📦 *Flavour:* ${flavourTitle}\n` +
           `📱 *Target Device:* Poco F6 (\`peridot\`) / GKI 2.0\n` +
-          `🔄 *Progress:* \`[■□□□□□] 10%\`\n` +
+          `🔄 *Progress:* \`[■□□□□□□□□□] 10%\`\n` +
           `⏳ *Status:* Dispatching build runner...`,
         parse_mode: "Markdown",
       });
@@ -174,8 +174,8 @@ async function handleUpdate(update, env) {
             `━━━━━━━━━━━━━━━━━━━━\n` +
             `📦 *Flavour:* ${flavourTitle}\n` +
             `📱 *Target Device:* Poco F6 (\`peridot\`) / GKI 2.0\n` +
-            `🔄 *Progress:* \`[■□□□□□] 15%\`\n` +
-            `⏳ *Status:* Runner spinning up in cloud...`,
+            `🔄 *Progress:* \`[■■□□□□□□□□] 15%\`\n` +
+            `⏳ *Status:* Cloud runner spinning up...`,
           parse_mode: "Markdown",
         });
       } else {
