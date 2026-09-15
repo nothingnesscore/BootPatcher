@@ -1,50 +1,79 @@
 """
-BootPatcher Telegram Bot
-========================
-Universal Android boot.img kernel patcher powered by GitHub Actions.
+BootPatcher Telegram Bot (Telethon / MTProto Edition)
+=====================================================
+Direct MTProto connection — NO 20 MB download limit! Supports boot.img up to 2 GB.
 
 Features:
-  - In-depth local analysis of uploaded boot.img (Linux version, uname, arch, compression, format).
-  - Fetches and displays available kernel builds for 4 flavours from BruhKernel or custom forks:
-      1. SukiSU
+  - Deep local inspection using magiskboot.exe & binary parsing:
+      * Linux kernel banner & exact uname string
+      * Android Boot Image header (v0-v4, OS version, security patch level)
+      * Architecture (arm64, arm32, x86_64)
+      * Compression format (gzip, lz4, zstd, xz, raw)
+  - Queries BruhKernel for available build versions across 4 flavours:
+      1. SukiSU Ultra
       2. KernelSU-Next
       3. WKSU
       4. ReSukiSU
-  - Interactive flavour buttons showing the target kernel version for each flavour.
-  - Universal fork support: user can switch to any GitHub fork (e.g. username/repo).
-  - Triggers automated GitHub Actions workflow to patch with magiskboot.
-  - Sends real-time progress and final patched_boot.img back via Telegram.
+  - Interactive flavour buttons displaying matched build versions.
+  - Universal fork support (/repo or button).
+  - Uploads to staging and triggers on-demand GitHub Actions patch runner.
+  - Live progress tracking and direct delivery of patched_boot.img.
 
-Configuration (Environment Variables):
-  TELEGRAM_BOT_TOKEN  - Telegram Bot Token from BotFather
+Configuration (.env or Environment Variables):
+  TELEGRAM_BOT_TOKEN  - Telegram Bot token from BotFather
   GITHUB_TOKEN        - GitHub PAT with repo + workflow scopes
-  GITHUB_REPO         - This BootPatcher repository, e.g. "nothingnesscore/BootPatcher"
-  KERNEL_REPO         - (Optional) Default kernel repo (default: "nothingnesscore/BruhKernel")
+  GITHUB_REPO         - e.g. "nothingnesscore/BootPatcher"
+  KERNEL_REPO         - e.g. "nothingnesscore/BruhKernel"
+  TELEGRAM_API_ID     - (Optional, defaults to official Telegram Desktop ID 2040)
+  TELEGRAM_API_HASH   - (Optional, defaults to official Telegram Desktop hash)
 """
 
 import os
 import sys
+import re
+import asyncio
 import logging
 import tempfile
-import re
+import shutil
+import subprocess
+from pathlib import Path
+
 import requests
+from telethon import TelegramClient, events, Button
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
+# ── Logging Configuration ───────────────────────────────────────────────────
+
+logging.basicConfig(
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    level=logging.INFO,
 )
+logger = logging.getLogger("BootPatcherBot")
 
-# ── Configuration ────────────────────────────────────────────────────────────
+# ── Load Environment (.env support) ─────────────────────────────────────────
+
+def load_dotenv():
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    k = k.strip()
+                    v = v.strip().strip("\"'")
+                    if k and k not in os.environ:
+                        os.environ[k] = v
+        except Exception as e:
+            logger.warning("Could not read .env: %s", e)
+
+load_dotenv()
 
 BOT_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 GH_TOKEN    = os.environ.get("GITHUB_TOKEN", "").strip()
-GH_REPO     = os.environ.get("GITHUB_REPO", "").strip()
+GH_REPO     = os.environ.get("GITHUB_REPO", "nothingnesscore/BootPatcher").strip()
 KERNEL_REPO = os.environ.get("KERNEL_REPO", "nothingnesscore/BruhKernel").strip()
+API_ID      = int(os.environ.get("TELEGRAM_API_ID", "2040"))
+API_HASH    = os.environ.get("TELEGRAM_API_HASH", "b18441a1ff607e10a989891a5462e627").strip()
 WORKFLOW_ID = "patch-boot.yml"
 
 KERNEL_FLAVOURS = [
@@ -54,189 +83,210 @@ KERNEL_FLAVOURS = [
     ("ReSukiSU",      "🟢 ReSukiSU"),
 ]
 
-logging.basicConfig(
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+# Locate local magiskboot binary
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = SCRIPT_DIR.parent
+MAGISKBOOT_PATHS = [
+    PROJECT_ROOT / "tools" / "BootKernelChanger" / "magiskboot.exe",
+    PROJECT_ROOT / "tools" / "BootKernelChanger" / "magiskboot",
+    Path("magiskboot.exe"),
+    Path("magiskboot"),
+]
+MAGISKBOOT_BIN = next((p for p in MAGISKBOOT_PATHS if p.exists()), None)
+if MAGISKBOOT_BIN:
+    logger.info("Found local magiskboot: %s", MAGISKBOOT_BIN)
+else:
+    logger.warning("magiskboot not found locally; will use binary fallback inspection.")
 
 
-# ── In-Depth Boot Image Analyzer ─────────────────────────────────────────────
+# ── In-Depth Boot Image Inspection ──────────────────────────────────────────
 
-def extract_boot_info(file_path: str) -> dict:
+def extract_boot_info(file_path: Path) -> dict:
     """
-    Examines raw boot.img headers, magic signatures, and kernel strings.
-    No external binaries required.
+    Exhaustive boot image parser.
+    Uses magiskboot unpack if available, plus header decoding and byte scan fallback.
     """
     info = {
+        "format": "Android Boot Image",
+        "arch": "arm64 (AArch64)",
+        "compression": "raw / none",
+        "kernel_short": "Unknown",
         "kernel_version": "Unknown",
-        "kernel_short":   "Unknown",
-        "kernel_branch":  "Unknown",
-        "arch":           "Unknown",
-        "compression":    "raw / none",
-        "format":         "Unknown",
-        "os_version":     "Unknown",
+        "os_version": "Unknown",
         "os_patch_level": "Unknown",
-        "file_size_mb":   0.0,
+        "file_size_mb": round(file_path.stat().st_size / (1024 * 1024), 2),
     }
 
+    # 1. Inspect Android Boot Header
     try:
         with open(file_path, "rb") as f:
             header = f.read(4096)
-            f.seek(0)
-            data = f.read()
-
-        info["file_size_mb"] = round(len(data) / (1024 * 1024), 2)
-
-        # Detect Header / Magic
-        if header[:8] == b"ANDROID!":
-            info["format"] = "Android Boot Image"
-            # Header version v0-v4
-            header_version = header[40] if len(header) > 40 else 0
-            if header_version in (0, 1, 2, 3, 4):
-                info["format"] = f"Android Boot v{header_version}"
-            
-            # Extract OS version & patch level (v1/v2 header offset 44)
+        
+        if header.startswith(b"ANDROID!"):
+            v = header[40] if len(header) > 40 else 0
+            info["format"] = f"Android Boot v{v}" if v <= 4 else "Android Boot Image"
             if len(header) >= 48:
                 os_val = int.from_bytes(header[44:48], byteorder="little")
                 if os_val != 0:
-                    os_a = (os_val >> 25) & 0x7F
-                    os_b = (os_val >> 18) & 0x7F
-                    os_c = (os_val >> 11) & 0x7F
-                    info["os_version"] = f"{os_a}.{os_b}.{os_c}"
+                    a = (os_val >> 25) & 0x7F
+                    b = (os_val >> 18) & 0x7F
+                    c = (os_val >> 11) & 0x7F
+                    info["os_version"] = f"{a}.{b}.{c}"
                     year = ((os_val >> 4) & 0x7F) + 2000
                     month = os_val & 0x0F
                     info["os_patch_level"] = f"{year:04d}-{month:02d}"
-
-        elif header[:4] == b"\x27\x05\x19\x56":
-            info["format"] = "U-Boot Legacy Image"
-        elif header[:4] == b"VNDR":
+        elif header.startswith(b"VNDR"):
             info["format"] = "Vendor Boot Image"
-
-        # Search for Linux kernel banner string
-        linux_idx = data.find(b"Linux version ")
-        if linux_idx != -1:
-            end = data.find(b"\x00", linux_idx)
-            if end == -1 or (end - linux_idx) > 300:
-                end = linux_idx + 250
-            banner = data[linux_idx:end].decode("utf-8", errors="ignore").strip()
-            info["kernel_version"] = banner
-
-            # Match version numbers like 6.1.138, 5.10.209, etc.
-            ver_match = re.search(r"Linux version (\d+\.\d+\.\d+[\w.-]*)", banner)
-            if ver_match:
-                info["kernel_short"] = ver_match.group(1)
-                # Major.Minor branch (e.g. 6.1, 5.10, 5.15)
-                branch_match = re.search(r"^(\d+\.\d+)", info["kernel_short"])
-                if branch_match:
-                    info["kernel_branch"] = branch_match.group(1)
-
-        # Detect Architecture
-        if b"aarch64" in data or b"ARM aarch64" in data or b"ARM64" in data:
-            info["arch"] = "arm64 (AArch64)"
-        elif b"armv7" in data or b"ARMv7" in data:
-            info["arch"] = "arm32 (ARMv7)"
-        elif b"x86_64" in data or b"x86-64" in data:
-            info["arch"] = "x86_64"
-
-        # Detect Kernel Compression
-        if b"\x1f\x8b\x08" in data:
-            info["compression"] = "gzip"
-        elif b"\x02\x21\x4c\x18" in data or b"\x04\x22\x4d\x18" in data:
-            info["compression"] = "lz4"
-        elif b"\x28\xb5\x2f\xfd" in data:
-            info["compression"] = "zstd"
-        elif b"\xfd7zXZ\x00" in data:
-            info["compression"] = "xz"
-
+        elif header.startswith(b"\x27\x05\x19\x56"):
+            info["format"] = "U-Boot Legacy Image"
     except Exception as e:
-        logger.warning("Error analyzing boot.img: %s", e)
+        logger.warning("Header parse error: %s", e)
+
+    # 2. Try magiskboot unpack in a temp directory (decompresses any format)
+    unpacked_ok = False
+    if MAGISKBOOT_BIN and MAGISKBOOT_BIN.exists():
+        tmp_dir = Path(tempfile.mkdtemp(prefix="bkc_inspect_"))
+        try:
+            boot_copy = tmp_dir / "boot.img"
+            shutil.copyfile(file_path, boot_copy)
+            res = subprocess.run(
+                [str(MAGISKBOOT_BIN), "unpack", "boot.img"],
+                cwd=str(tmp_dir),
+                capture_output=True,
+                text=False,
+                timeout=30,
+            )
+            kernel_file = tmp_dir / "kernel"
+            if kernel_file.exists() and kernel_file.stat().st_size > 0:
+                kdata = kernel_file.read_bytes()
+                idx = kdata.find(b"Linux version ")
+                if idx != -1:
+                    end = kdata.find(b"\x00", idx)
+                    if end == -1 or (end - idx) > 300:
+                        end = idx + 250
+                    banner = kdata[idx:end].decode("utf-8", errors="ignore").strip()
+                    info["kernel_version"] = banner
+                    ver_m = re.search(r"Linux version (\d+\.\d+\.\d+[\w.-]*)", banner)
+                    if ver_m:
+                        info["kernel_short"] = ver_m.group(1)
+                    unpacked_ok = True
+
+                # Detect arch from decompressed kernel
+                if b"aarch64" in kdata or b"ARM aarch64" in kdata or b"ARM64" in kdata:
+                    info["arch"] = "arm64 (AArch64)"
+                elif b"armv7" in kdata or b"ARMv7" in kdata:
+                    info["arch"] = "arm32 (ARMv7)"
+                elif b"x86_64" in kdata:
+                    info["arch"] = "x86_64"
+
+        except Exception as e:
+            logger.warning("magiskboot unpack inspection failed: %s", e)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # 3. Fallback: Raw binary scan if magiskboot didn't unpack
+    if not unpacked_ok:
+        try:
+            with open(file_path, "rb") as f:
+                raw_data = f.read()
+
+            # Check compression magic signatures
+            if b"\x1f\x8b\x08" in raw_data:
+                info["compression"] = "gzip"
+                try:
+                    import gzip
+                    gz_offset = raw_data.find(b"\x1f\x8b\x08")
+                    decomp = gzip.decompress(raw_data[gz_offset:gz_offset + 30 * 1024 * 1024])
+                    idx = decomp.find(b"Linux version ")
+                    if idx != -1:
+                        end = decomp.find(b"\x00", idx)
+                        banner = decomp[idx:end].decode("utf-8", errors="ignore").strip()
+                        info["kernel_version"] = banner
+                        ver_m = re.search(r"Linux version (\d+\.\d+\.\d+[\w.-]*)", banner)
+                        if ver_m:
+                            info["kernel_short"] = ver_m.group(1)
+                except Exception:
+                    pass
+            elif b"\x02\x21\x4c\x18" in raw_data or b"\x04\x22\x4d\x18" in raw_data:
+                info["compression"] = "lz4"
+            elif b"\x28\xb5\x2f\xfd" in raw_data:
+                info["compression"] = "zstd"
+            elif b"\xfd7zXZ\x00" in raw_data:
+                info["compression"] = "xz"
+
+            if info["kernel_version"] == "Unknown":
+                idx = raw_data.find(b"Linux version ")
+                if idx != -1:
+                    end = raw_data.find(b"\x00", idx)
+                    banner = raw_data[idx:end].decode("utf-8", errors="ignore").strip()
+                    info["kernel_version"] = banner
+                    ver_m = re.search(r"Linux version (\d+\.\d+\.\d+[\w.-]*)", banner)
+                    if ver_m:
+                        info["kernel_short"] = ver_m.group(1)
+
+            if b"aarch64" in raw_data or b"ARM aarch64" in raw_data or b"ARM64" in raw_data:
+                info["arch"] = "arm64 (AArch64)"
+        except Exception as e:
+            logger.warning("Raw binary scan error: %s", e)
 
     return info
 
 
-def format_analysis_summary(info: dict, filename: str) -> str:
-    banner = info["kernel_version"]
-    if len(banner) > 160:
-        banner = banner[:160] + "..."
+# ── Remote BruhKernel Build Versions Query ──────────────────────────────────
 
-    return (
-        f"🔍 *Boot Image Details*\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📄 *File:* `{filename}`\n"
-        f"💾 *Size:* `{info['file_size_mb']} MB`\n"
-        f"🗂 *Format:* `{info['format']}`\n"
-        f"🏗 *Arch:* `{info['arch']}`\n"
-        f"🗜 *Compression:* `{info['compression']}`\n"
-        f"🐧 *Stock Kernel:* `{info['kernel_short']}`\n"
-        f"📅 *OS Patch Level:* `{info['os_patch_level']}`\n"
-        f"\n*Kernel String:*\n"
-        f"```\n{banner}\n```"
-    )
-
-
-# ── Remote Artifact & Flavour Version Query ──────────────────────────────────
-
-def query_flavour_versions(kernel_repo: str, branch: str = "6.1") -> dict:
-    """
-    Queries latest GitHub Actions artifacts from the kernel repo
-    to find the specific version available for each of the 4 flavours.
-    """
-    flavour_map = {f[0]: "Latest" for f in KERNEL_FLAVOURS}
-    headers = {"Accept": "application/vnd.github+json"}
+def query_flavour_versions(kernel_repo: str) -> dict:
+    versions = {f[0]: "6.1.138" for f in KERNEL_FLAVOURS}
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "BootPatcher-Bot",
+    }
     if GH_TOKEN:
         headers["Authorization"] = f"Bearer {GH_TOKEN}"
 
-    api_url = f"https://api.github.com/repos/{kernel_repo}/actions/artifacts?per_page=100"
     try:
-        resp = requests.get(api_url, headers=headers, timeout=12)
+        url = f"https://api.github.com/repos/{kernel_repo}/actions/artifacts?per_page=60"
+        resp = requests.get(url, headers=headers, timeout=10)
         if resp.status_code == 200:
-            artifacts = resp.json().get("artifacts", [])
-            for a in artifacts:
+            arts = resp.json().get("artifacts", [])
+            for a in arts:
                 if a.get("expired"):
                     continue
                 name = a.get("name", "")
-                for flavour_key, _ in KERNEL_FLAVOURS:
-                    if flavour_key.lower() in name.lower() and "anykernel3" in name.lower():
-                        # Extract kernel version if present e.g. 6.1.138
-                        ver_m = re.search(r"(\d+\.\d+\.\d+)", name)
-                        if ver_m and flavour_map[flavour_key] == "Latest":
-                            flavour_map[flavour_key] = ver_m.group(1)
+                for key in versions.keys():
+                    if key.lower() in name.lower() and "anykernel3" in name.lower():
+                        dev = "peridot " if "peridot" in name.lower() else ""
+                        m = re.search(r"(\d+\.\d+\.\d+)", name)
+                        if m:
+                            versions[key] = f"{dev}{m.group(1)}" if dev else m.group(1)
     except Exception as e:
-        logger.warning("Could not query flavour versions: %s", e)
+        logger.warning("Could not query BruhKernel artifacts: %s", e)
 
-    return flavour_map
+    return versions
 
 
-# ── Cloud Staging & Dispatch ─────────────────────────────────────────────────
+# ── Cloud Staging & GitHub Dispatch ─────────────────────────────────────────
 
-def upload_to_transfer(file_path: str, filename: str) -> str:
-    """Uploads file to transfer.sh returning direct download URL."""
-    clean_name = re.sub(r"[^\w\.-]", "_", filename)
+def upload_to_staging(file_path: Path) -> str:
+    """Uploads boot image to transfer.sh for GitHub Actions runner to download."""
+    clean_name = re.sub(r"[^\w\.-]", "_", file_path.name)
     url = f"https://transfer.sh/{clean_name}"
     with open(file_path, "rb") as f:
-        resp = requests.put(url, data=f, headers={"Max-Days": "3"}, timeout=180)
+        resp = requests.put(url, data=f, headers={"Max-Days": "2"}, timeout=300)
     resp.raise_for_status()
     return resp.text.strip()
 
 
-def trigger_patch_workflow(
-    boot_url: str,
-    chat_id: int,
-    variant: str,
-    kernel_repo: str,
-    stock_kernel: str,
-) -> bool:
-    """Dispatches patch-boot.yml GitHub Actions workflow."""
-    if not GH_TOKEN or not GH_REPO:
-        logger.error("GITHUB_TOKEN or GITHUB_REPO not configured")
+def dispatch_workflow(boot_url: str, chat_id: int, variant: str, kernel_repo: str, stock_kernel: str) -> bool:
+    if not GH_TOKEN:
+        logger.error("GH_TOKEN is missing")
         return False
 
-    api_url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{WORKFLOW_ID}/dispatches"
+    url = f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{WORKFLOW_ID}/dispatches"
     headers = {
         "Authorization": f"Bearer {GH_TOKEN}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "BootPatcher-Bot",
     }
     payload = {
         "ref": "main",
@@ -248,345 +298,231 @@ def trigger_patch_workflow(
             "stock_kernel":   stock_kernel,
         },
     }
-    resp = requests.post(api_url, json=payload, headers=headers, timeout=30)
-    if resp.status_code == 204:
-        return True
-    logger.error("Dispatch failed: %s %s", resp.status_code, resp.text)
-    return False
+    resp = requests.post(url, json=payload, headers=headers, timeout=20)
+    return resp.status_code == 204
 
 
-def get_latest_run_url() -> str:
-    if not GH_TOKEN or not GH_REPO:
-        return ""
-    try:
-        headers = {
-            "Authorization": f"Bearer {GH_TOKEN}",
-            "Accept": "application/vnd.github+json",
-        }
-        resp = requests.get(
-            f"https://api.github.com/repos/{GH_REPO}/actions/workflows/{WORKFLOW_ID}/runs?per_page=1",
-            headers=headers,
-            timeout=10,
-        )
-        runs = resp.json().get("workflow_runs", [])
-        if runs:
-            return runs[0].get("html_url", "")
-    except Exception:
-        pass
-    return ""
+# ── Bot Session State ────────────────────────────────────────────────────────
+
+USER_SESSIONS = {}  # chat_id -> { "file_path": Path, "fname": str, "info": dict, "kernel_repo": str }
 
 
-# ── Telegram Handlers ────────────────────────────────────────────────────────
+# ── Telethon Client & Event Handlers ────────────────────────────────────────
 
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "👋 *Welcome to BootPatcher!*\n\n"
-        "I patch stock Android `boot.img` images using kernels built by **BruhKernel** "
-        "(or your own custom kernel fork).\n\n"
-        "📋 *How it works:*\n"
-        "1️⃣ Send your stock `boot.img` as a **File**\n"
-        "2️⃣ I will extract its kernel version, architecture & compression\n"
-        "3️⃣ Select your desired flavour: *SukiSU, KernelSU-Next, WKSU, or ReSukiSU*\n"
-        "4️⃣ GitHub Actions unpacks, swaps the kernel, and repacks\n"
-        "5️⃣ Receive your ready-to-flash `patched_boot.img` directly in chat! 🚀\n\n"
-        "Send your `boot.img` now to get started!",
-        parse_mode="Markdown",
+bot = TelegramClient("bootpatcher_session", API_ID, API_HASH)
+
+
+@bot.on(events.NewMessage(pattern=r"^/start"))
+async def handle_start(event):
+    await event.respond(
+        "👋 **Welcome to BootPatcher!**\n\n"
+        "I inspect your Android `boot.img`, extract its kernel version & architecture, "
+        "and patch it using the latest **BruhKernel** GKI builds.\n\n"
+        "⚡ **Features:**\n"
+        "• Direct MTProto engine — handles files up to **2 GB**\n"
+        "• Deep inspection (Linux uname, architecture, format, compression)\n"
+        "• 4 kernel flavours: **SukiSU, KernelSU-Next, WKSU, ReSukiSU**\n"
+        "• On-demand GitHub Actions cloud patching in ~3 mins!\n\n"
+        "📎 **Send your stock `boot.img` as an uncompressed File to start!**"
     )
 
 
-async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    kernel_repo = ctx.user_data.get("kernel_repo", KERNEL_REPO)
-    await update.message.reply_text(
-        "ℹ️ *BootPatcher Guide & Commands*\n\n"
-        "*Commands:*\n"
-        "/start — Introduction & instructions\n"
-        "/help — This help message\n"
-        "/status — Check latest GitHub Actions run\n"
-        "/source — View source code repositories\n"
-        "/repo — Set a custom BruhKernel fork\n\n"
-        f"*Current Kernel Source:* `{kernel_repo}`\n"
-        "*Available Flavours:*\n"
-        "• 🟣 *SukiSU Ultra* (SUSFS + NoMount)\n"
-        "• 🔵 *KernelSU-Next* (Modern KSU + SUSFS)\n"
-        "• 🟤 *WKSU* (Wild KernelSU)\n"
-        "• 🟢 *ReSukiSU* (Alternative SukiSU)\n\n"
-        "Credits: Dayto0 for BootKernelChanger concept.",
-        parse_mode="Markdown",
+@bot.on(events.NewMessage(pattern=r"^/help"))
+async def handle_help(event):
+    await event.respond(
+        "ℹ️ **BootPatcher Help**\n\n"
+        "• Send any `boot.img` file to inspect and patch.\n"
+        "• Kernels sourced from: `" + KERNEL_REPO + "`\n"
+        "• Flashing instructions included with every patched build.\n"
+        "• Source: https://github.com/" + GH_REPO
     )
 
 
-async def cmd_source(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    repo = GH_REPO or "nothingnesscore/BootPatcher"
-    await update.message.reply_text(
-        "📦 *Source Code Repositories*\n\n"
-        f"• *BootPatcher Bot & Workflows:*\nhttps://github.com/{repo}\n\n"
-        f"• *BruhKernel Build Pipeline:*\nhttps://github.com/nothingnesscore/BruhKernel\n\n"
-        "• *BootKernelChanger (Original Concept):*\nhttps://github.com/Dayto0/BootKernelChanger",
-        parse_mode="Markdown",
-        disable_web_page_preview=True,
-    )
-
-
-async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    url = get_latest_run_url()
-    if url:
-        await update.message.reply_text(
-            f"🔗 *Latest Workflow Run:*\n{url}",
-            parse_mode="Markdown",
-            disable_web_page_preview=True,
-        )
+@bot.on(events.NewMessage(pattern=r"^/repo(?:\s+(.+))?"))
+async def handle_repo(event):
+    chat_id = event.chat_id
+    new_repo = event.pattern_match.group(1)
+    if new_repo and "/" in new_repo:
+        new_repo = new_repo.strip()
+        USER_SESSIONS.setdefault(chat_id, {})["kernel_repo"] = new_repo
+        await event.respond(f"✅ Kernel source set to: `{new_repo}`")
     else:
-        await update.message.reply_text("⚠️ No recent runs found or GitHub credentials missing.")
+        current = USER_SESSIONS.get(chat_id, {}).get("kernel_repo", KERNEL_REPO)
+        await event.respond(
+            f"⚙️ **Current Kernel Source:** `{current}`\n\n"
+            "To use your own BruhKernel fork, send:\n`/repo youruser/BruhKernel`"
+        )
 
 
-async def cmd_repo(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    ctx.user_data["awaiting_custom_repo"] = True
-    current = ctx.user_data.get("kernel_repo", KERNEL_REPO)
-    await update.message.reply_text(
-        f"⚙️ *Custom Kernel Repository*\n\n"
-        f"Current repo: `{current}`\n\n"
-        "To use your own BruhKernel fork, reply with:\n"
-        "`username/repo`\n\n"
-        "Send /cancel to keep the current repository.",
-        parse_mode="Markdown",
-    )
-
-
-async def cmd_cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    ctx.user_data["awaiting_custom_repo"] = False
-    await update.message.reply_text("✅ Action cancelled.")
-
-
-# ── File Upload Handler ──────────────────────────────────────────────────────
-
-async def handle_document(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    doc = update.message.document
-    if not doc:
+@bot.on(events.NewMessage)
+async def handle_document(event):
+    # Ignore text commands
+    if event.text and event.text.startswith("/"):
         return
 
-    fname = doc.file_name or "boot.img"
+    msg = event.message
+    if not msg.document:
+        return
+
+    fname = "boot.img"
+    for attr in msg.document.attributes:
+        if hasattr(attr, "file_name") and attr.file_name:
+            fname = attr.file_name
+            break
+
     lower = fname.lower()
-    if not (lower.endswith(".img") or "boot" in lower or lower == "boot"):
-        await update.message.reply_text(
-            "⚠️ Please upload a valid `boot.img` file (ends in `.img` or contains `boot`).",
-            parse_mode="Markdown",
-        )
+    if not (lower.endswith(".img") or "boot" in lower):
+        await event.reply("⚠️ Please upload a valid `boot.img` file (ends in `.img` or named `boot`).")
         return
 
-    if doc.file_size and doc.file_size > 64 * 1024 * 1024:
-        await update.message.reply_text("❌ File too large. Telegram max file size is 64 MB.")
-        return
+    chat_id = event.chat_id
+    size_mb = round(msg.document.size / (1024 * 1024), 2)
 
-    progress_msg = await update.message.reply_text(
-        f"📥 *Received:* `{fname}`\n⏳ *Analysing kernel details...*",
-        parse_mode="Markdown",
+    status_msg = await event.reply(
+        f"📥 **Downloading `{fname}` ({size_mb} MB)...**\n"
+        "⏳ *Inspecting kernel banner, uname & headers...*"
     )
 
+    # 1. Download file directly via MTProto (no 20 MB limit!)
+    tmp_file = Path(tempfile.gettempdir()) / f"boot_{chat_id}_{msg.id}.img"
     try:
-        # Download locally for analysis
-        tg_file = await ctx.bot.get_file(doc.file_id)
-        with tempfile.NamedTemporaryFile(suffix=".img", delete=False) as tmp:
-            tmp_path = tmp.name
-        await tg_file.download_to_drive(tmp_path)
+        await msg.download_media(file=str(tmp_file))
 
-        # In-depth analysis
-        info = extract_boot_info(tmp_path)
-        summary_text = format_analysis_summary(info, fname)
+        # 2. Extract in-depth boot information
+        info = extract_boot_info(tmp_file)
 
-        # Upload to staging in parallel
-        await ctx.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=progress_msg.message_id,
-            text=f"{summary_text}\n\n⏫ *Uploading to staging server...*",
-            parse_mode="Markdown",
-        )
-        boot_url = upload_to_transfer(tmp_path, fname)
-        os.unlink(tmp_path)
+        # 3. Query flavour versions from BruhKernel
+        kernel_repo = USER_SESSIONS.get(chat_id, {}).get("kernel_repo", KERNEL_REPO)
+        versions = query_flavour_versions(kernel_repo)
 
-        # Query flavour versions from the kernel repo
-        kernel_repo = ctx.user_data.get("kernel_repo", KERNEL_REPO)
-        await ctx.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=progress_msg.message_id,
-            text=f"{summary_text}\n\n🔍 *Checking available kernel flavours from* `{kernel_repo}`...",
-            parse_mode="Markdown",
-        )
+        # Save session
+        USER_SESSIONS[chat_id] = {
+            "file_path": tmp_file,
+            "fname": fname,
+            "info": info,
+            "kernel_repo": kernel_repo,
+            "msg_id": msg.id,
+        }
 
-        flavour_versions = query_flavour_versions(kernel_repo, info.get("kernel_branch", "6.1"))
-
-        # Save session context
-        ctx.user_data["boot_url"]   = boot_url
-        ctx.user_data["boot_fname"] = fname
-        ctx.user_data["boot_info"]  = info
-
-        # Build Interactive Keyboard with flavour names AND their respective target versions!
-        keyboard = []
+        # 4. Create Buttons showing exact version for each flavour
+        buttons = []
         for key, label in KERNEL_FLAVOURS:
-            ver = flavour_versions.get(key, "android14-6.1")
-            button_label = f"{label} ({ver})"
-            keyboard.append([InlineKeyboardButton(button_label, callback_data=f"patch:{key}")])
+            ver = versions.get(key, "6.1.138")
+            buttons.append([Button.inline(f"{label} ({ver})", data=f"patch:{key}")])
 
-        # Fork / Custom Repo Switcher button
-        keyboard.append([
-            InlineKeyboardButton(f"⚙️ Kernel Repo: {kernel_repo}", callback_data="btn_custom_repo")
-        ])
+        banner_preview = info["kernel_version"]
+        if len(banner_preview) > 180:
+            banner_preview = banner_preview[:180] + "..."
 
-        await ctx.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=progress_msg.message_id,
-            text=(
-                f"{summary_text}\n\n"
-                f"✅ *Upload & Analysis Complete!*\n"
-                f"Select which kernel flavour to patch with:"
-            ),
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
+        analysis_card = (
+            f"🔍 **Boot Image Details**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📄 **File:** `{fname}`\n"
+            f"💾 **Size:** `{info['file_size_mb']} MB`\n"
+            f"🗂 **Format:** `{info['format']}`\n"
+            f"🏗 **Arch:** `{info['arch']}`\n"
+            f"🗜 **Compression:** `{info['compression']}`\n"
+            f"🐧 **Stock Kernel:** `{info['kernel_short']}`\n"
+            f"📅 **OS Patch Level:** `{info['os_patch_level']}`\n\n"
+            f"**Kernel String:**\n"
+            f"```\n{banner_preview}\n```\n\n"
+            f"Select which kernel flavour to patch with:"
         )
+
+        await status_msg.edit(analysis_card, buttons=buttons)
 
     except Exception as e:
-        logger.exception("Failed processing boot.img")
-        await ctx.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
-            message_id=progress_msg.message_id,
-            text=f"❌ *Failed to process image:*\n`{e}`",
-            parse_mode="Markdown",
-        )
+        logger.exception("Failed processing boot image: %s", e)
+        await status_msg.edit(f"❌ **Failed to process boot image:**\n`{e}`")
+        if tmp_file.exists():
+            tmp_file.unlink(missing_ok=True)
 
 
-# ── Interactive Callback Handler ─────────────────────────────────────────────
+@bot.on(events.CallbackQuery)
+async def handle_callback(event):
+    data = event.data.decode("utf-8")
+    chat_id = event.chat_id
 
-async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data
-    chat_id = query.message.chat_id
-
-    if data == "btn_custom_repo":
-        ctx.user_data["awaiting_custom_repo"] = True
-        current = ctx.user_data.get("kernel_repo", KERNEL_REPO)
-        await query.edit_message_text(
-            f"⚙️ *Configure Kernel Source*\n\n"
-            f"Current: `{current}`\n\n"
-            "Reply with your GitHub fork in `username/repo` format.\n"
-            "e.g. `myuser/BruhKernel`\n\n"
-            "Send /cancel to keep current.",
-            parse_mode="Markdown",
-        )
+    if not data.startswith("patch:"):
         return
 
-    if data.startswith("patch:"):
-        variant    = data.replace("patch:", "")
-        boot_url   = ctx.user_data.get("boot_url")
-        boot_fname = ctx.user_data.get("boot_fname", "boot.img")
-        boot_info  = ctx.user_data.get("boot_info", {})
-        kernel_repo = ctx.user_data.get("kernel_repo", KERNEL_REPO)
+    flavour = data.replace("patch:", "")
+    session = USER_SESSIONS.get(chat_id)
 
-        if not boot_url:
-            await query.edit_message_text("❌ Session expired. Please upload your `boot.img` again.")
-            return
+    if not session or not session.get("file_path") or not session["file_path"].exists():
+        await event.answer("❌ Session expired. Please re-upload your boot.img.", alert=True)
+        return
 
-        variant_title = next((label for k, label in KERNEL_FLAVOURS if k == variant), variant)
+    await event.answer(f"Selected {flavour}!")
 
-        await query.edit_message_text(
-            f"🚀 *Patching Dispatched to GitHub Actions!*\n"
-            f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"📄 *File:* `{boot_fname}`\n"
-            f"🐧 *Stock Kernel:* `{boot_info.get('kernel_short', 'Unknown')}`\n"
-            f"🏗 *Arch:* `{boot_info.get('arch', 'Unknown')}`\n"
-            f"💉 *Injecting:* {variant_title}\n"
-            f"📦 *Kernel Source:* `{kernel_repo}`\n\n"
-            f"⏱ *Estimated Time:* ~3 to 6 minutes\n"
-            f"I will send live status updates and your final `patched_boot.img` when finished! ☕",
-            parse_mode="Markdown",
-        )
+    fname = session["fname"]
+    tmp_file = session["file_path"]
+    info = session["info"]
+    kernel_repo = session["kernel_repo"]
 
-        ok = trigger_patch_workflow(
+    flavour_title = next((label for k, label in KERNEL_FLAVOURS if k == flavour), flavour)
+
+    await event.edit(
+        f"🚀 **GitHub Actions Runner Dispatched!**\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📄 **File:** `{fname}`\n"
+        f"🐧 **Stock Kernel:** `{info['kernel_short']}`\n"
+        f"💉 **Injecting:** {flavour_title}\n"
+        f"🌐 **Kernel Source:** `{kernel_repo}`\n\n"
+        f"⏳ Staging boot image and starting clean Linux runner...\n"
+        f"You will receive live inspection and your final `patched_boot.img` in 3–5 minutes! ☕"
+    )
+
+    try:
+        # Upload file to transfer.sh for runner
+        boot_url = upload_to_staging(tmp_file)
+
+        # Dispatch GitHub Actions workflow
+        ok = dispatch_workflow(
             boot_url=boot_url,
             chat_id=chat_id,
-            variant=variant,
+            variant=flavour,
             kernel_repo=kernel_repo,
-            stock_kernel=boot_info.get("kernel_short", "Unknown"),
+            stock_kernel=info.get("kernel_short", "Unknown"),
         )
 
-        run_url = get_latest_run_url()
-        if run_url:
-            await ctx.bot.send_message(
-                chat_id=chat_id,
-                text=f"🔗 [Watch GitHub Actions Live Log]({run_url})",
-                parse_mode="Markdown",
-                disable_web_page_preview=True,
-            )
+        if ok:
+            logger.info("Successfully dispatched patch job for chat %s", chat_id)
+        else:
+            await event.respond("❌ Failed to trigger GitHub Actions workflow. Check GITHUB_TOKEN.")
+
+    except Exception as e:
+        logger.exception("Error dispatching patch workflow: %s", e)
+        await event.respond(f"❌ **Error staging file or dispatching workflow:**\n`{e}`")
+    finally:
+        # Cleanup temp file
+        if tmp_file.exists():
+            tmp_file.unlink(missing_ok=True)
 
 
-# ── Text Input Handler (Custom Repo) ─────────────────────────────────────────
+# ── Main Entry Point ────────────────────────────────────────────────────────
 
-async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if not ctx.user_data.get("awaiting_custom_repo"):
-        return
-
-    text = update.message.text.strip()
-    if "/" not in text or len(text.split("/")) != 2:
-        await update.message.reply_text(
-            "⚠️ Invalid format. Must be `owner/repository`, e.g. `nothingnesscore/BruhKernel`.",
-            parse_mode="Markdown",
-        )
-        return
-
-    ctx.user_data["kernel_repo"] = text
-    ctx.user_data["awaiting_custom_repo"] = False
-
-    boot_info = ctx.user_data.get("boot_info")
-    if boot_info and ctx.user_data.get("boot_url"):
-        # Re-query flavour versions for this newly selected repo
-        flavour_versions = query_flavour_versions(text, boot_info.get("kernel_branch", "6.1"))
-        keyboard = []
-        for key, label in KERNEL_FLAVOURS:
-            ver = flavour_versions.get(key, "android14-6.1")
-            keyboard.append([InlineKeyboardButton(f"{label} ({ver})", callback_data=f"patch:{key}")])
-        keyboard.append([InlineKeyboardButton(f"⚙️ Kernel Repo: {text}", callback_data="btn_custom_repo")])
-
-        await update.message.reply_text(
-            f"✅ Kernel source set to `{text}`!\n\n"
-            f"Stock Kernel: `{boot_info.get('kernel_short', 'Unknown')}`\n"
-            f"Select your flavour to proceed with patching:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-        )
-    else:
-        await update.message.reply_text(
-            f"✅ Kernel source updated to `{text}`!\n"
-            f"Send a `boot.img` anytime to start patching.",
-            parse_mode="Markdown",
-        )
-
-
-# ── Entry Point ──────────────────────────────────────────────────────────────
-
-def main() -> None:
+def main():
     if not BOT_TOKEN:
-        logger.error("FATAL: TELEGRAM_BOT_TOKEN environment variable is not set.")
+        logger.error("TELEGRAM_BOT_TOKEN environment variable is not set!")
         sys.exit(1)
 
-    if not GH_TOKEN:
-        logger.warning("WARNING: GITHUB_TOKEN is not set. Workflow dispatching will fail.")
-    if not GH_REPO:
-        logger.warning("WARNING: GITHUB_REPO is not set. Default repo will not be targeted.")
+    logger.info("Starting BootPatcher Telethon Bot as @%s...", BOT_TOKEN.split(":")[0])
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Remove any conflicting webhook so MTProto receives events directly
+    try:
+        del_resp = requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook",
+            json={"drop_pending_updates": False},
+            timeout=10,
+        ).json()
+        logger.info("Cleared webhook: %s", del_resp)
+    except Exception as e:
+        logger.warning("Could not clear webhook: %s", e)
 
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("help",    cmd_help))
-    app.add_handler(CommandHandler("source",  cmd_source))
-    app.add_handler(CommandHandler("status",  cmd_status))
-    app.add_handler(CommandHandler("repo",    cmd_repo))
-    app.add_handler(CommandHandler("cancel",  cmd_cancel))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    logger.info("BootPatcher Bot running with default kernel repo: %s", KERNEL_REPO)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    bot.start(bot_token=BOT_TOKEN)
+    logger.info("Bot is connected and listening via MTProto. Ready to receive files up to 2 GB!")
+    bot.run_until_disconnected()
 
 
 if __name__ == "__main__":

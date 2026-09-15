@@ -6,3 +6,6 @@ build/
 .env
 *.tmp
 *.log
+*.session
+*.session-journal
+temp_inspect/
