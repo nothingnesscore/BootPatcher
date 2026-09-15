@@ -303,7 +303,7 @@ async function handleUpdate(update, env) {
       });
 
       // Dispatch GitHub Actions workflow passing status_message_id
-      const dispatchOk = await dispatchGitHubAction(env, {
+      const dispatchRes = await dispatchGitHubAction(env, {
         chat_id:           String(chatId),
         message_id:        String(uploadMsgId),
         status_message_id: String(statusMsgId),
@@ -313,7 +313,7 @@ async function handleUpdate(update, env) {
         device_target:     "peridot",
       });
 
-      if (dispatchOk) {
+      if (dispatchRes.ok) {
         await tgSend(token, "editMessageText", {
           chat_id: chatId,
           message_id: statusMsgId,
@@ -327,10 +327,11 @@ async function handleUpdate(update, env) {
           parse_mode: "Markdown",
         });
       } else {
+        const errSnippet = dispatchRes.error ? `\n\n\`${dispatchRes.error.slice(0, 160)}\`` : "";
         await tgSend(token, "editMessageText", {
           chat_id: chatId,
           message_id: statusMsgId,
-          text: "❌ *Failed to start build runner.* Please verify GitHub tokens and permissions.",
+          text: `❌ *Failed to start build runner* (HTTP ${dispatchRes.status || 0}).\nPlease verify GitHub tokens and permissions.${errSnippet}`,
           parse_mode: "Markdown",
         });
       }
@@ -388,20 +389,31 @@ async function dispatchGitHubAction(env, inputs) {
   const repo = env.GITHUB_REPO || "nothingnesscore/BootPatcher";
   const url = `https://api.github.com/repos/${repo}/actions/workflows/patch-boot.yml/dispatches`;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${env.GITHUB_TOKEN}`,
-      "Accept": "application/vnd.github+json",
-      "User-Agent": "BootPatcher-Serverless-Webhook",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      ref: "main",
-      inputs: inputs,
-    }),
-  });
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.GITHUB_TOKEN}`,
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "BootPatcher-Serverless-Webhook",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ref: "main",
+        inputs: inputs,
+      }),
+    });
 
-  return res.status === 204;
+    if (res.status === 204) {
+      return { ok: true, status: 204 };
+    }
+
+    const errText = await res.text();
+    console.error(`GitHub dispatch failed (${res.status}):`, errText);
+    return { ok: false, status: res.status, error: errText };
+  } catch (err) {
+    console.error("GitHub dispatch network error:", err);
+    return { ok: false, status: 0, error: err.message };
+  }
 }

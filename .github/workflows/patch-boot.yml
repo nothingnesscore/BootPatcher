@@ -251,12 +251,8 @@ jobs:
                 RUN_ID_BK=$(echo "$ACTIVE_RUN" | jq -r '.id // empty')
                 echo "A BruhKernel Build is already in progress: $RUN_URL (ID: $RUN_ID_BK)"
                 if [ -n "${STATUS_ID}" ]; then
-                  python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "⚡ *BruhKernel Build In Progress*
-━━━━━━━━━━━━━━━━━━━━
-📱 *Target Device:* \`${{ inputs.device_target || 'peridot' }}\` / GKI 2.0
-📦 *Flavour:* \`${VARIANT}\`
-⏳ *Status:* Kernel is currently compiling in BruhKernel!
-🔗 [Watch BruhKernel Build](${RUN_URL})"
+                  BK_MSG=$(printf '⚡ *BruhKernel Build In Progress*\n━━━━━━━━━━━━━━━━━━━━\n📱 *Target Device:* `%s` / GKI 2.0\n📦 *Flavour:* `%s`\n⏳ *Status:* Kernel is currently compiling in BruhKernel!\n🔗 [Watch BruhKernel Build](%s)' "${{ inputs.device_target || 'peridot' }}" "${VARIANT}" "${RUN_URL}")
+                  python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "$BK_MSG"
                 fi
               else
                 echo "Enquiring / triggering on-demand BruhKernel Build for ${VARIANT}..."
@@ -272,12 +268,8 @@ jobs:
                 if [ "$DISPATCH_CODE" = "204" ]; then
                   echo "Successfully enquired and triggered BruhKernel Build!"
                   if [ -n "${STATUS_ID}" ]; then
-                    python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "🚀 *Dispatched BruhKernel Build*
-━━━━━━━━━━━━━━━━━━━━
-📱 *Target Device:* \`${{ inputs.device_target || 'peridot' }}\` / GKI 2.0
-📦 *Flavour:* \`${VARIANT}\`
-⏳ *Status:* On-demand kernel build dispatched in BruhKernel!
-🔗 [BruhKernel Actions](https://github.com/${KERNEL_REPO}/actions)"
+                    BK_DISP_MSG=$(printf '🚀 *Dispatched BruhKernel Build*\n━━━━━━━━━━━━━━━━━━━━\n📱 *Target Device:* `%s` / GKI 2.0\n📦 *Flavour:* `%s`\n⏳ *Status:* On-demand kernel build dispatched in BruhKernel!\n🔗 [BruhKernel Actions](https://github.com/%s/actions)' "${{ inputs.device_target || 'peridot' }}" "${VARIANT}" "${KERNEL_REPO}")
+                    python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "$BK_DISP_MSG"
                   fi
                 else
                   ERR_MSG="❌ No pre-built \`${VARIANT}\` artifact found in \`${KERNEL_REPO}\`, and dispatch returned status ${DISPATCH_CODE}."
