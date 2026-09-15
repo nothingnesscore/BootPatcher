@@ -48,6 +48,10 @@ on:
         default: "peridot"
         type: string
 
+permissions:
+  contents: read
+  actions: read
+
 jobs:
   patch:
     runs-on: ubuntu-latest
