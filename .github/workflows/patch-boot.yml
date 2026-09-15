@@ -340,20 +340,7 @@ jobs:
           ✅ *Status:* Complete! Delivering modified boot image below ⬇️"
           fi
 
-          cat << 'EOF' > caption.txt
-          🎉 *Patched Boot Image*
-          ━━━━━━━━━━━━━━━━━━━━
-          📦 *Flavour:* ${{ inputs.kernel_variant }}
-          🐧 *Kernel:* Linux ${{ env.NEW_UNAME_SHORT }}
-          📱 *Device:* Poco F6 (peridot) / GKI 2.0
-
-          📋 *Quick Flashing Steps:*
-          • TWRP/OrangeFox: Install ➔ Install Image ➔ Select file ➔ Flash to Boot
-          • Fastboot: fastboot flash boot patched_boot.img
-          EOF
-
-          sed -i "s/\${{ inputs.kernel_variant }}/${{ inputs.kernel_variant }}/g" caption.txt
-          sed -i "s/\${{ env.NEW_UNAME_SHORT }}/${{ env.NEW_UNAME_SHORT }}/g" caption.txt
+          printf '🎉 *Patched Boot Image*\n━━━━━━━━━━━━━━━━━━━━\n📦 *Flavour:* %s\n🐧 *Kernel:* Linux %s\n📱 *Device:* Poco F6 (peridot) / GKI 2.0\n\n📋 *Quick Flashing Steps:*\n• TWRP/OrangeFox: Install ➔ Install Image ➔ Select file ➔ Flash to Boot\n• Fastboot: fastboot flash boot patched_boot.img\n' "${{ inputs.kernel_variant }}" "${{ env.NEW_UNAME_SHORT }}" > caption.txt
 
           echo "Uploading via MTProto..."
           python3 bot/upload_tg.py "${CHAT_ID}" patch_env/new-boot.img caption.txt || {

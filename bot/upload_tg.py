@@ -42,6 +42,7 @@ async def upload_file(chat_id: int, file_path: str, caption: str):
             chat_id,
             file_path,
             caption=caption,
+            parse_mode="md",
             progress_callback=progress
         )
         print("Successfully sent patched boot.img to Telegram chat!", flush=True)
