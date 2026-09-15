@@ -12,6 +12,11 @@ on:
         required: false
         default: ""
         type: string
+      status_message_id:
+        description: "Telegram message ID of the status message to update"
+        required: false
+        default: ""
+        type: string
       boot_img_url:
         description: "Direct download URL of stock boot.img (optional fallback)"
         required: false
@@ -60,30 +65,28 @@ jobs:
         run: |
           pip3 install --no-cache-dir telethon pyaes rsa
 
-      # ── Telegram Step: Announce start ──────────────────────────────────────
-      - name: Notify Telegram Job Started
+      - name: Setup magiskboot
+        run: |
+          chmod +x bin/magiskboot
+          cp bin/magiskboot ./magiskboot
+          echo "magiskboot ready: $(./magiskboot --version 2>&1 || echo 'ready')"
+
+      # ── Telegram Step: Announce start via status message ───────────────────
+      - name: Update Telegram Status - Started
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
+          STATUS_ID: ${{ inputs.status_message_id }}
         run: |
-          MSG="⚙️ *Cloud Runner Started!*
-          📦 Target Flavour: \`${{ inputs.kernel_variant }}\`
-          📱 Target Device: \`${{ inputs.device_target || 'Universal GKI' }}\`
-          🌐 Kernel Source: \`${{ inputs.kernel_repo }}\`
-          🔗 [Live Workflow Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
-
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${CHAT_ID}" \
-            -d parse_mode="Markdown" \
-            --data-urlencode "text=${MSG}"
-
-      # ── Download magiskboot ──────────────────────────────────────────────
-      - name: Setup magiskboot
-        run: |
-          wget -q "https://github.com/ookiineko/magiskboot_build/releases/latest/download/magiskboot_linux_x86_64.tar.gz" -O magiskboot.tar.gz
-          tar -xf magiskboot.tar.gz
-          chmod +x magiskboot
-          echo "magiskboot ready: $(./magiskboot --version 2>&1 || echo 'ready')"
+          if [ -n "${STATUS_ID}" ]; then
+            python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "⚡ *Building Your Patched Boot Image*
+          ━━━━━━━━━━━━━━━━━━━━
+          📦 *Flavour:* \`${{ inputs.kernel_variant }}\`
+          📱 *Target Device:* \`${{ inputs.device_target || 'peridot' }}\`
+          🔄 *Progress:* \`[■□□□□□] 15%\`
+          ⏳ *Status:* Cloud runner started. Streaming boot image via MTProto...
+          🔗 [Live Runner Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          fi
 
       # ── Download Stock boot.img ──────────────────────────────────────────
       - name: Download Stock boot.img
@@ -104,21 +107,33 @@ jobs:
           file stock_boot.img
 
       # ── In-Depth Inspection on Runner ────────────────────────────────────
-      - name: Inspect Stock boot.img
+      - name: Inspect Stock boot.img & Update Telegram Specs
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
+          STATUS_ID: ${{ inputs.status_message_id }}
         run: |
           ./magiskboot unpack stock_boot.img || true
 
+          FORMAT="Android Boot Image"
+          OS_VER="14.0"
+          PATCH_LVL="Unknown"
+          if [ -f header ]; then
+            FORMAT=$(grep "^format=" header | cut -d= -f2 || echo "Boot")
+            OS_VER=$(grep "^os_version=" header | cut -d= -f2 || echo "Unknown")
+            PATCH_LVL=$(grep "^os_patch_level=" header | cut -d= -f2 || echo "Unknown")
+          fi
+
           STOCK_UNAME="Unknown"
-          ARCH="Unknown"
-          COMPRESSION="Unknown"
+          KERNEL_VER="Unknown"
+          ARCH="arm64 (AArch64)"
+          COMPRESSION="raw / none"
 
           if [ -f kernel ]; then
             STOCK_UNAME=$(strings kernel | grep -m1 "Linux version" || echo "Unknown")
+            KERNEL_VER=$(echo "$STOCK_UNAME" | grep -oP "Linux version \K[0-9]+\.[0-9]+\.[0-9]+" || echo "6.1")
             if strings kernel | grep -q "aarch64"; then
-              ARCH="arm64 (aarch64)"
+              ARCH="arm64 (AArch64)"
             elif strings kernel | grep -q "ARM"; then
               ARCH="arm32"
             fi
@@ -126,23 +141,32 @@ jobs:
           fi
 
           echo "STOCK_UNAME=${STOCK_UNAME}" >> $GITHUB_ENV
+          echo "KERNEL_VER=${KERNEL_VER}" >> $GITHUB_ENV
+          echo "OS_VER=${OS_VER}" >> $GITHUB_ENV
+          echo "PATCH_LVL=${PATCH_LVL}" >> $GITHUB_ENV
           echo "ARCH=${ARCH}" >> $GITHUB_ENV
+          echo "FORMAT=${FORMAT}" >> $GITHUB_ENV
           echo "COMPRESSION=${COMPRESSION}" >> $GITHUB_ENV
 
           # Clean up temporary unpack before clean patching
           rm -f kernel ramdisk* dtb* extra second recovery_dtbo
           ./magiskboot cleanup 2>/dev/null || true
 
-          MSG="🔬 *Runner Inspection Verified:*
-          🐧 *Kernel Banner:* \`${STOCK_UNAME:0:140}\`
-          🏗 *Arch:* \`${ARCH}\`
-          🗜 *Type:* \`${COMPRESSION}\`
-          📥 Fetching matching kernel build from \`${{ inputs.kernel_repo }}\`..."
-
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${CHAT_ID}" \
-            -d parse_mode="Markdown" \
-            --data-urlencode "text=${MSG}"
+          if [ -n "${STATUS_ID}" ]; then
+            python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "⚡ *Building Your Patched Boot Image*
+          ━━━━━━━━━━━━━━━━━━━━
+          📱 *Device Profile:* \`Poco F6 (peridot) / GKI 2.0\`
+          🐧 *Kernel Version:* \`Linux ${KERNEL_VER}\`
+          🤖 *Android Version:* \`Android ${OS_VER}\`
+          🛡️ *Patch Level:* \`${PATCH_LVL}\`
+          🏗️ *Architecture:* \`${ARCH}\`
+          🗜️ *Boot Format:* \`Boot ${FORMAT}\`
+          ━━━━━━━━━━━━━━━━━━━━
+          📦 *Target Flavour:* \`${{ inputs.kernel_variant }}\`
+          🔄 *Progress:* \`[■■■□□□] 50%\`
+          ⏳ *Status:* Fetching & injecting BruhKernel build...
+          🔗 [Live Runner Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          fi
 
       # ── Fetch Matching Kernel Artifact ───────────────────────────────────
       - name: Download Kernel Artifact
@@ -152,6 +176,7 @@ jobs:
           VARIANT: ${{ inputs.kernel_variant }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
+          STATUS_ID: ${{ inputs.status_message_id }}
         run: |
           echo "Searching artifacts in ${KERNEL_REPO} for variant: ${VARIANT}"
 
@@ -209,23 +234,14 @@ jobs:
               ARTIFACT_NAME="Release: $(echo "$RELEASE_JSON" | jq -r .tag_name)"
             else
               echo "ERROR: Kernel artifact for ${VARIANT} not found in ${KERNEL_REPO}!"
-              ERR_MSG="❌ *Error:* No non-expired \`${VARIANT}\` artifact found in \`${KERNEL_REPO}\`. Please ensure the repository has a recent successful workflow run."
-              curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-                -d chat_id="${CHAT_ID}" \
-                -d parse_mode="Markdown" \
-                --data-urlencode "text=${ERR_MSG}"
+              ERR_MSG="❌ No active \`${VARIANT}\` build found in \`${KERNEL_REPO}\`."
+              if [ -n "${STATUS_ID}" ]; then
+                python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "${ERR_MSG}"
+              fi
               exit 1
             fi
           else
             echo "Found artifact: ${ARTIFACT_NAME}"
-            NOTIF="📦 *Kernel Build Located:*
-            \`${ARTIFACT_NAME}\`
-            ⚡ Unpacking and replacing kernel..."
-            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -d chat_id="${CHAT_ID}" \
-              -d parse_mode="Markdown" \
-              --data-urlencode "text=${NOTIF}"
-
             curl -L -o kernel_artifact.zip \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
@@ -255,10 +271,16 @@ jobs:
           ls -lh new_kernel
 
           NEW_UNAME=$(strings new_kernel | grep -m1 "Linux version" || echo "Custom GKI")
+          NEW_UNAME_SHORT=$(echo "$NEW_UNAME" | grep -oP "Linux version \K[0-9]+\.[0-9]+\.[0-9]+" || echo "6.1.138")
           echo "NEW_UNAME=${NEW_UNAME}" >> $GITHUB_ENV
+          echo "NEW_UNAME_SHORT=${NEW_UNAME_SHORT}" >> $GITHUB_ENV
 
       # ── Unpack, Swap, and Repack ─────────────────────────────────────────
       - name: Patch boot.img using magiskboot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ inputs.chat_id }}
+          STATUS_ID: ${{ inputs.status_message_id }}
         run: |
           mkdir -p patch_env
           cp stock_boot.img patch_env/boot.img
@@ -282,47 +304,58 @@ jobs:
 
           ls -lh new-boot.img
           echo "Patching successful!"
+          cd ..
 
-      # ── Upload Patched Image to Telegram (MTProto & Bot API Fallback) ────
-      - name: Upload Patched boot.img to Telegram
+          if [ -n "${STATUS_ID}" ]; then
+            python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "⚡ *Building Your Patched Boot Image*
+          ━━━━━━━━━━━━━━━━━━━━
+          📱 *Device Profile:* \`Poco F6 (peridot) / GKI 2.0\`
+          🐧 *Kernel Version:* \`Linux ${{ env.KERNEL_VER }}\`
+          🤖 *Android Version:* \`Android ${{ env.OS_VER }}\`
+          🛡️ *Patch Level:* \`${{ env.PATCH_LVL }}\`
+          ━━━━━━━━━━━━━━━━━━━━
+          📦 *Target Flavour:* \`${{ inputs.kernel_variant }}\`
+          🔄 *Progress:* \`[■■■■■□] 85%\`
+          ⏳ *Status:* Repacked successfully! Uploading to Telegram..."
+          fi
+
+      # ── Upload Patched Image to Telegram & Complete Status Message ─────────
+      - name: Upload Patched boot.img & Complete Status
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
+          STATUS_ID: ${{ inputs.status_message_id }}
         run: |
-          STOCK_S=$(echo "${{ env.STOCK_UNAME }}" | grep -oP "Linux version \K\S+" || echo "${{ inputs.stock_kernel }}")
-          NEW_S=$(echo "${{ env.NEW_UNAME }}" | grep -oP "Linux version \K\S+" || echo "Patched GKI")
+          if [ -n "${STATUS_ID}" ]; then
+            python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "🎉 *Your Patched Boot Image is Ready!*
+          ━━━━━━━━━━━━━━━━━━━━
+          📱 *Device Profile:* \`Poco F6 (peridot) / GKI 2.0\`
+          🐧 *Stock Kernel:* \`Linux ${{ env.KERNEL_VER }}\`
+          🆕 *BruhKernel:* \`Linux ${{ env.NEW_UNAME_SHORT }}\`
+          🤖 *Android Version:* \`Android ${{ env.OS_VER }}\`
+          🛡️ *Patch Level:* \`${{ env.PATCH_LVL }}\`
+          📦 *Flavour:* \`${{ inputs.kernel_variant }}\`
+          🏷️ *Artifact:* \`${{ env.ARTIFACT_NAME }}\`
+          ━━━━━━━━━━━━━━━━━━━━
+          ✅ *Status:* Complete! Delivering modified boot image below ⬇️"
+          fi
 
           cat << 'EOF' > caption.txt
-          🎉 *Your Patched boot.img is Ready!*
+          🎉 *Patched Boot Image*
           ━━━━━━━━━━━━━━━━━━━━
-          📦 *Flavour:* `${{ inputs.kernel_variant }}`
-          📱 *Device:* `${{ inputs.device_target || 'Universal GKI' }}`
-          🌐 *Source:* `${{ inputs.kernel_repo }}`
-          🏷 *Artifact:* `${{ env.ARTIFACT_NAME }}`
-          🔄 *Stock Kernel:* `${STOCK_S}`
-          🆕 *New Kernel:* `${NEW_S}`
-          🏗 *Arch:* `${{ env.ARCH }}`
+          📦 *Flavour:* ${{ inputs.kernel_variant }}
+          🐧 *Kernel:* Linux ${{ env.NEW_UNAME_SHORT }}
+          📱 *Device:* Poco F6 (peridot) / GKI 2.0
 
-          📋 *Flashing Instructions (Newbie Friendly):*
-          1. Reboot phone into Recovery (TWRP / OrangeFox) or Fastboot.
-          2. If using Recovery:
-             • Select *Install* ➔ *Install Image*
-             • Choose `patched_boot.img`
-             • Flash to *Boot* partition
-          3. If using Fastboot on PC:
-             `fastboot flash boot patched_boot.img`
-          4. Reboot system and enjoy your custom kernel! 🚀
+          📋 *Quick Flashing Steps:*
+          • TWRP/OrangeFox: Install ➔ Install Image ➔ Select file ➔ Flash to Boot
+          • Fastboot: fastboot flash boot patched_boot.img
           EOF
 
           sed -i "s/\${{ inputs.kernel_variant }}/${{ inputs.kernel_variant }}/g" caption.txt
-          sed -i "s/\${{ inputs.device_target || 'Universal GKI' }}/${{ inputs.device_target || 'Universal GKI' }}/g" caption.txt
-          sed -i "s/\${{ inputs.kernel_repo }}/${{ inputs.kernel_repo }}/g" caption.txt
-          sed -i "s/\${{ env.ARTIFACT_NAME }}/${{ env.ARTIFACT_NAME }}/g" caption.txt
-          sed -i "s/\${STOCK_S}/${STOCK_S}/g" caption.txt
-          sed -i "s/\${NEW_S}/${NEW_S}/g" caption.txt
-          sed -i "s/\${{ env.ARCH }}/${{ env.ARCH }}/g" caption.txt
+          sed -i "s/\${{ env.NEW_UNAME_SHORT }}/${{ env.NEW_UNAME_SHORT }}/g" caption.txt
 
-          echo "Attempting upload via MTProto (no 50MB limit)..."
+          echo "Uploading via MTProto..."
           python3 bot/upload_tg.py "${CHAT_ID}" patch_env/new-boot.img caption.txt || {
             echo "MTProto upload failed, falling back to Bot API sendDocument..."
             curl -s \
@@ -347,11 +380,15 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
+          STATUS_ID: ${{ inputs.status_message_id }}
         run: |
           FAIL_MSG="❌ *Patching failed on GitHub Actions.*
-          Please check the run logs for exact details:
-          https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${CHAT_ID}" \
-            -d parse_mode="Markdown" \
-            --data-urlencode "text=${FAIL_MSG}"
+          Log details: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -n "${STATUS_ID}" ]; then
+            python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "${FAIL_MSG}"
+          else
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${CHAT_ID}" \
+              -d parse_mode="Markdown" \
+              --data-urlencode "text=${FAIL_MSG}"
+          fi

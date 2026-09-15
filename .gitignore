@@ -9,3 +9,4 @@ build/
 *.session
 *.session-journal
 temp_inspect/
+scratch/
