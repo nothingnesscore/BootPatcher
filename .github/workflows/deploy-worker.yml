@@ -14,12 +14,17 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    if: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
       - name: Deploy to Cloudflare Workers
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          if [ -z "$CF_TOKEN" ]; then
+            echo "CLOUDFLARE_API_TOKEN secret is not set. Skipping automatic deployment."
+            echo "You can deploy manually using 'npx wrangler deploy' or paste webhook/worker.js into the Cloudflare Dashboard."
+            exit 0
+          fi
+          npx wrangler deploy
