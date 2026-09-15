@@ -3,13 +3,19 @@ name: Patch Boot Image
 on:
   workflow_dispatch:
     inputs:
-      boot_img_url:
-        description: "Direct download URL of stock boot.img (from transfer.sh)"
-        required: true
-        type: string
       chat_id:
         description: "Telegram chat ID to send result to"
         required: true
+        type: string
+      message_id:
+        description: "Telegram message ID containing the uploaded boot.img"
+        required: false
+        default: ""
+        type: string
+      boot_img_url:
+        description: "Direct download URL of stock boot.img (optional fallback)"
+        required: false
+        default: ""
         type: string
       kernel_variant:
         description: "Kernel flavour to inject"
@@ -34,7 +40,7 @@ on:
       device_target:
         description: "Optional device target filter (e.g. peridot, or empty for generic GKI)"
         required: false
-        default: ""
+        default: "peridot"
         type: string
 
 jobs:
@@ -45,7 +51,14 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -q -y wget unzip file curl jq binutils
+          sudo apt-get install -q -y wget unzip file curl jq binutils python3-pip
+
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python Dependencies
+        run: |
+          pip3 install --no-cache-dir telethon pyaes rsa
 
       # ── Telegram Step: Announce start ──────────────────────────────────────
       - name: Notify Telegram Job Started
@@ -53,10 +66,11 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ inputs.chat_id }}
         run: |
-          MSG="⚙️ *GitHub Actions runner started!*
+          MSG="⚙️ *Cloud Runner Started!*
           📦 Target Flavour: \`${{ inputs.kernel_variant }}\`
+          📱 Target Device: \`${{ inputs.device_target || 'Universal GKI' }}\`
           🌐 Kernel Source: \`${{ inputs.kernel_repo }}\`
-          🔗 [Live Run Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
+          🔗 [Live Workflow Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
 
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${CHAT_ID}" \
@@ -73,9 +87,19 @@ jobs:
 
       # ── Download Stock boot.img ──────────────────────────────────────────
       - name: Download Stock boot.img
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
-          echo "Downloading from: ${{ inputs.boot_img_url }}"
-          wget -q "${{ inputs.boot_img_url }}" -O stock_boot.img
+          if [ -n "${{ inputs.message_id }}" ]; then
+            echo "Downloading from Telegram MTProto (chat: ${{ inputs.chat_id }}, msg: ${{ inputs.message_id }})..."
+            python3 bot/download_tg.py "${{ inputs.chat_id }}" "${{ inputs.message_id }}" stock_boot.img
+          elif [ -n "${{ inputs.boot_img_url }}" ]; then
+            echo "Downloading from URL: ${{ inputs.boot_img_url }}"
+            wget -q "${{ inputs.boot_img_url }}" -O stock_boot.img
+          else
+            echo "ERROR: Neither message_id nor boot_img_url was provided!"
+            exit 1
+          fi
           ls -lh stock_boot.img
           file stock_boot.img
 
@@ -123,7 +147,7 @@ jobs:
       # ── Fetch Matching Kernel Artifact ───────────────────────────────────
       - name: Download Kernel Artifact
         env:
-          GH_TOKEN: ${{ secrets.BRUHKERNEL_GH_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.BRUHKERNEL_GH_TOKEN || secrets.BOT_GH_TOKEN || secrets.GITHUB_TOKEN }}
           KERNEL_REPO: ${{ inputs.kernel_repo }}
           VARIANT: ${{ inputs.kernel_variant }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -259,7 +283,7 @@ jobs:
           ls -lh new-boot.img
           echo "Patching successful!"
 
-      # ── Send Patched Image to Telegram ───────────────────────────────────
+      # ── Upload Patched Image to Telegram (MTProto & Bot API Fallback) ────
       - name: Upload Patched boot.img to Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -268,31 +292,54 @@ jobs:
           STOCK_S=$(echo "${{ env.STOCK_UNAME }}" | grep -oP "Linux version \K\S+" || echo "${{ inputs.stock_kernel }}")
           NEW_S=$(echo "${{ env.NEW_UNAME }}" | grep -oP "Linux version \K\S+" || echo "Patched GKI")
 
-          CAPTION="🎉 *Your Patched boot.img is Ready!*
+          cat << 'EOF' > caption.txt
+          🎉 *Your Patched boot.img is Ready!*
           ━━━━━━━━━━━━━━━━━━━━
-          📦 *Flavour:* \`${{ inputs.kernel_variant }}\`
-          🌐 *Source:* \`${{ inputs.kernel_repo }}\`
-          🏷 *Artifact:* \`${{ env.ARTIFACT_NAME }}\`
-          🔄 *Stock Kernel:* \`${STOCK_S}\`
-          🆕 *New Kernel:* \`${NEW_S}\`
-          🏗 *Arch:* \`${{ env.ARCH }}\`
+          📦 *Flavour:* `${{ inputs.kernel_variant }}`
+          📱 *Device:* `${{ inputs.device_target || 'Universal GKI' }}`
+          🌐 *Source:* `${{ inputs.kernel_repo }}`
+          🏷 *Artifact:* `${{ env.ARTIFACT_NAME }}`
+          🔄 *Stock Kernel:* `${STOCK_S}`
+          🆕 *New Kernel:* `${NEW_S}`
+          🏗 *Arch:* `${{ env.ARCH }}`
 
           📋 *Flashing Instructions (Newbie Friendly):*
           1. Reboot phone into Recovery (TWRP / OrangeFox) or Fastboot.
           2. If using Recovery:
              • Select *Install* ➔ *Install Image*
-             • Choose \`patched_boot.img\`
+             • Choose `patched_boot.img`
              • Flash to *Boot* partition
           3. If using Fastboot on PC:
-             \`fastboot flash boot patched_boot.img\`
-          4. Reboot system and enjoy your custom kernel! 🚀"
+             `fastboot flash boot patched_boot.img`
+          4. Reboot system and enjoy your custom kernel! 🚀
+          EOF
 
-          curl -s \
-            -F "chat_id=${CHAT_ID}" \
-            -F "document=@patch_env/new-boot.img;filename=patched_boot.img" \
-            -F "caption=${CAPTION}" \
-            -F "parse_mode=Markdown" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+          sed -i "s/\${{ inputs.kernel_variant }}/${{ inputs.kernel_variant }}/g" caption.txt
+          sed -i "s/\${{ inputs.device_target || 'Universal GKI' }}/${{ inputs.device_target || 'Universal GKI' }}/g" caption.txt
+          sed -i "s/\${{ inputs.kernel_repo }}/${{ inputs.kernel_repo }}/g" caption.txt
+          sed -i "s/\${{ env.ARTIFACT_NAME }}/${{ env.ARTIFACT_NAME }}/g" caption.txt
+          sed -i "s/\${STOCK_S}/${STOCK_S}/g" caption.txt
+          sed -i "s/\${NEW_S}/${NEW_S}/g" caption.txt
+          sed -i "s/\${{ env.ARCH }}/${{ env.ARCH }}/g" caption.txt
+
+          echo "Attempting upload via MTProto (no 50MB limit)..."
+          python3 bot/upload_tg.py "${CHAT_ID}" patch_env/new-boot.img caption.txt || {
+            echo "MTProto upload failed, falling back to Bot API sendDocument..."
+            curl -s \
+              -F "chat_id=${CHAT_ID}" \
+              -F "document=@patch_env/new-boot.img;filename=patched_boot.img" \
+              -F "caption=$(cat caption.txt)" \
+              -F "parse_mode=Markdown" \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
+          }
+
+      # ── Upload Patched Artifact to GitHub Actions ────────────────────────
+      - name: Archive Patched boot.img Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched_boot_${{ inputs.kernel_variant }}_${{ github.run_id }}
+          path: patch_env/new-boot.img
+          retention-days: 7
 
       # ── Failure Handler ──────────────────────────────────────────────────
       - name: Telegram Failure Notification

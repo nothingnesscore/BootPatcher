@@ -2,12 +2,15 @@
  * BootPatcher Cloudflare Worker (Serverless Telegram Webhook)
  * ============================================================
  * Zero idle runners. Zero wasted GitHub Actions minutes.
+ * 100% Cloud-Powered: Works 24/7 even when user's PC is powered off.
  *
  * Capabilities:
- * 1. Inspects uploaded boot.img directly (kernel banner, uname, arch, format, compression).
- * 2. Queries latest BruhKernel builds and displays interactive flavour buttons.
- * 3. Dispatches GitHub Actions runner on-demand with safe callback_data (<64 bytes).
- * 4. Runner executes patching, repacks with magiskboot, and sends patched_boot.img back!
+ * 1. Handles Telegram /start and /help commands.
+ * 2. Receives stock boot.img uploads of any size (up to 2GB via MTProto on runner).
+ * 3. Queries latest BruhKernel builds and displays interactive flavour buttons.
+ * 4. Dispatches GitHub Actions cloud runner on-demand with safe callback_data (<64 bytes).
+ * 5. Runner downloads via MTProto, unpacks with magiskboot, inspects kernel strings,
+ *    injects requested flavour, repacks, and sends patched_boot.img back to user!
  */
 
 export default {
@@ -51,14 +54,14 @@ async function handleUpdate(update, env) {
 
     if (text.startsWith("/start")) {
       const msg =
-        "👋 *Welcome to BootPatcher!*\n\n" +
-        "I patch Android `boot.img` files on-demand using GKI kernels from *BruhKernel*.\n\n" +
+        "👋 *Welcome to BootPatcher Cloud Bot!*\n\n" +
+        "I patch Android `boot.img` files on-demand using GKI kernels from *BruhKernel* (Poco F6 / `peridot` & Universal GKI).\n\n" +
         "⚡ *How It Works:*\n" +
-        "1️⃣ Send your stock `boot.img` as an uncompressed *File*\n" +
-        "2️⃣ I will inspect the kernel banner, uname, architecture & format\n" +
-        "3️⃣ Choose your flavour: *SukiSU, KernelSU-Next, WKSU, or ReSukiSU*\n" +
-        "4️⃣ A dedicated GitHub Actions runner fires up on-demand to patch and repack\n" +
-        "5️⃣ Receive your ready-to-flash `patched_boot.img` in ~3 mins! 🚀\n\n" +
+        "1️⃣ Send your stock `boot.img` as an uncompressed *File* (any size, up to 2GB!)\n" +
+        "2️⃣ Choose your flavour: *🟣 SukiSU Ultra, 🔵 KernelSU-Next, 🟤 WKSU, or 🟢 ReSukiSU*\n" +
+        "3️⃣ A dedicated GitHub Actions cloud runner fires up on-demand to unpack, inspect kernel strings with `magiskboot`, and inject your chosen flavour\n" +
+        "4️⃣ Receive your ready-to-flash `patched_boot.img` directly here in ~2–3 mins! 🚀\n\n" +
+        "💡 *100% Cloud-Powered:* You can turn off your PC at any time — everything runs serverless in the cloud 24/7!\n\n" +
         "📎 *Upload your stock boot.img as a File to begin!*";
       await tgSend(token, "sendMessage", { chat_id: chatId, text: msg, parse_mode: "Markdown" });
       return;
@@ -66,11 +69,13 @@ async function handleUpdate(update, env) {
 
     if (text.startsWith("/help")) {
       const msg =
-        "ℹ️ *BootPatcher Help*\n\n" +
-        "• Send a `boot.img` file to inspect and patch.\n" +
+        "ℹ️ *BootPatcher Cloud Help*\n\n" +
+        "• Send your phone's stock `boot.img` file.\n" +
         "• Kernels sourced from: `" + kRepo + "` (android14-6.1)\n" +
+        "• Device target: Poco F6 (`peridot`) & Universal GKI\n" +
         "• Patching engine: `magiskboot` on clean Linux runners\n" +
-        "• Repository: https://github.com/" + repo;
+        "• Repository: https://github.com/" + repo + "\n\n" +
+        "Everything runs in the cloud on-demand. No local PC required!";
       await tgSend(token, "sendMessage", { chat_id: chatId, text: msg, parse_mode: "Markdown" });
       return;
     }
@@ -82,6 +87,7 @@ async function handleUpdate(update, env) {
     const chatId = update.message.chat.id;
     const msgId = update.message.message_id;
     const fname = doc.file_name || "boot.img";
+    const sizeMb = (doc.file_size / (1024 * 1024)).toFixed(2);
 
     const lower = fname.toLowerCase();
     if (!lower.endsWith(".img") && !lower.includes("boot")) {
@@ -94,97 +100,58 @@ async function handleUpdate(update, env) {
       return;
     }
 
-    // Acknowledge upload
-    const statusRes = await tgSend(token, "sendMessage", {
-      chat_id: chatId,
-      text: `📥 Received \`${fname}\` — inspecting kernel strings & headers...`,
-      parse_mode: "Markdown",
-      reply_parameters: { message_id: msgId },
-    });
-
-    const statusMsgId = statusRes.result?.message_id;
-
-    // Get file path from Telegram to inspect headers & strings
-    let info = {
-      format: "Android Boot Image",
-      arch: "arm64 (AArch64)",
-      compression: "raw / none",
-      kernel_short: "Unknown",
-      kernel_banner: "Android GKI",
-      os_version: "Unknown",
-      os_patch_level: "Unknown",
-      file_size_mb: (doc.file_size / (1024 * 1024)).toFixed(2),
-    };
-
-    try {
-      const fileRes = await tgSend(token, "getFile", { file_id: doc.file_id });
-      if (fileRes.ok && fileRes.result.file_path) {
-        const fileUrl = `https://api.telegram.org/file/bot${token}/${fileRes.result.file_path}`;
-        
-        // Fetch first 256 KB of image for header and string inspection
-        const rangeRes = await fetch(fileUrl, {
-          headers: { Range: "bytes=0-262143" },
-        });
-
-        if (rangeRes.ok || rangeRes.status === 206) {
-          const buffer = await rangeRes.arrayBuffer();
-          info = parseBootBuffer(buffer, doc.file_size, info);
-        }
-      }
-    } catch (e) {
-      console.error("Inspection error:", e);
-    }
-
     // Query available flavour versions from GitHub API in parallel
     const versions = await fetchFlavourVersions(kRepo, env.GITHUB_TOKEN);
 
-    // Build inline keyboard with SHORT callback_data (safe <64 bytes)
-    // We only pass the flavour key e.g. "p:SukiSU"
+    // Build inline keyboard with message_id in callback_data: `p:${flavour}:${msgId}` (always < 30 bytes)
     const keyboard = BASE_FLAVOURS.map((f) => {
       const ver = versions[f.id] || "6.1.138";
       return [
         {
           text: `${f.label} (${ver})`,
-          callback_data: `p:${f.id}`,
+          callback_data: `p:${f.id}:${msgId}`,
         },
       ];
     });
 
-    const bannerPreview = info.kernel_banner.length > 180
-      ? info.kernel_banner.substring(0, 180) + "..."
-      : info.kernel_banner;
+    let headerInfo = "";
+    // If file is <= 20 MB, we can inspect headers via Telegram Bot API
+    if (doc.file_size <= 20 * 1024 * 1024) {
+      try {
+        const fileRes = await tgSend(token, "getFile", { file_id: doc.file_id });
+        if (fileRes.ok && fileRes.result.file_path) {
+          const fileUrl = `https://api.telegram.org/file/bot${token}/${fileRes.result.file_path}`;
+          const rangeRes = await fetch(fileUrl, { headers: { Range: "bytes=0-262143" } });
+          if (rangeRes.ok || rangeRes.status === 206) {
+            const buffer = await rangeRes.arrayBuffer();
+            const parsed = parseBootBuffer(buffer, doc.file_size);
+            if (parsed.kernel_short !== "Unknown") {
+              headerInfo = `\n🐧 *Detected Stock Kernel:* \`${parsed.kernel_short}\``;
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Header inspection error:", e);
+      }
+    }
 
     const analysisMsg =
-      `🔍 *Boot Image Details*\n` +
+      `📦 *Stock boot.img Received!*\\n` +
       `━━━━━━━━━━━━━━━━━━━━\n` +
       `📄 *File:* \`${fname}\`\n` +
-      `💾 *Size:* \`${info.file_size_mb} MB\`\n` +
-      `🗂 *Format:* \`${info.format}\`\n` +
-      `🏗 *Arch:* \`${info.arch}\`\n` +
-      `🗜 *Compression:* \`${info.compression}\`\n` +
-      `🐧 *Stock Kernel:* \`${info.kernel_short}\`\n` +
-      `📅 *OS Patch Level:* \`${info.os_patch_level}\`\n\n` +
-      `*Kernel String:*\n` +
-      `\`\`\`\n${bannerPreview}\n\`\`\`\n\n` +
-      `Select which kernel flavour to patch with:`;
+      `💾 *Size:* \`${sizeMb} MB\`\n` +
+      `📱 *Target:* \`peridot\` / Android 14 GKI\n` +
+      `⚡ *Engine:* \`magiskboot\` Cloud Runner${headerInfo}\n\n` +
+      `👉 *Select your desired BruhKernel flavour below:*\n` +
+      `_(Dedicated runner will spin up on-demand to inspect kernel banner & strings, inject your chosen flavour, repack, and send it back to you!)_`;
 
-    if (statusMsgId) {
-      await tgSend(token, "editMessageText", {
-        chat_id: chatId,
-        message_id: statusMsgId,
-        text: analysisMsg,
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: keyboard },
-      });
-    } else {
-      await tgSend(token, "sendMessage", {
-        chat_id: chatId,
-        text: analysisMsg,
-        parse_mode: "Markdown",
-        reply_parameters: { message_id: msgId },
-        reply_markup: { inline_keyboard: keyboard },
-      });
-    }
+    await tgSend(token, "sendMessage", {
+      chat_id: chatId,
+      text: analysisMsg,
+      parse_mode: "Markdown",
+      reply_parameters: { message_id: msgId },
+      reply_markup: { inline_keyboard: keyboard },
+    });
     return;
   }
 
@@ -194,66 +161,43 @@ async function handleUpdate(update, env) {
     const data = cq.data || "";
 
     if (data.startsWith("p:")) {
-      const flavour = data.substring(2);
+      const parts = data.split(":");
+      const flavour = parts[1];
+      const uploadMsgId = parts[2]; // Message ID of the uploaded boot.img document
       const chatId  = cq.message.chat.id;
       const msgId   = cq.message.message_id;
 
       await tgSend(token, "answerCallbackQuery", { callback_query_id: cq.id });
 
-      // Retrieve the original document from reply_to_message
-      const replyMsg = cq.message.reply_to_message;
-      const doc = replyMsg?.document;
-      const fname = doc?.file_name || "boot.img";
-
-      if (!doc || !doc.file_id) {
-        await tgSend(token, "sendMessage", {
-          chat_id: chatId,
-          text: "❌ Session expired or original boot.img not found. Please upload your `boot.img` again.",
-          parse_mode: "Markdown",
-        });
-        return;
-      }
-
       const flavourTitle = BASE_FLAVOURS.find((f) => f.id === flavour)?.label || flavour;
 
-      // Update message to show runner status
+      // Update message to show live cloud runner status
       await tgSend(token, "editMessageText", {
         chat_id: chatId,
         message_id: msgId,
         text:
-          `🚀 *GitHub Actions Runner Dispatched!*\n` +
+          `🚀 *Cloud Runner Dispatched!*\n` +
           `━━━━━━━━━━━━━━━━━━━━\n` +
-          `📄 *File:* \`${fname}\`\n` +
           `💉 *Flavour:* ${flavourTitle}\n` +
-          `🌐 *Kernel Source:* \`${kRepo}\`\n\n` +
-          `⏳ An on-demand runner is spinning up now:\n` +
-          `1. Unpacking boot image with magiskboot\n` +
-          `2. Verifying kernel banner & uname strings\n` +
-          `3. Injecting \`${flavour}\` build\n` +
-          `4. Repacking and sending back\n\n` +
-          `You will receive live runner inspection and your \`patched_boot.img\` in 3–5 minutes! ☕`,
+          `🌐 *Kernel Source:* \`${kRepo}\`\n` +
+          `📱 *Device Target:* \`peridot\` / Android 14 GKI\n\n` +
+          `⏳ *Live Cloud Steps (Running Now):*\n` +
+          `1️⃣ Downloading \`boot.img\` via MTProto (no 20MB limit)\n` +
+          `2️⃣ Unpacking with \`magiskboot\` & verifying kernel strings\n` +
+          `3️⃣ Injecting \`${flavour}\` AnyKernel3 build\n` +
+          `4️⃣ Repacking & uploading \`patched_boot.img\` directly to this chat\n\n` +
+          `☕ *Your PC can stay OFF!* Everything is processing 100% in the cloud. You will receive your ready-to-flash file here in ~2–3 minutes!`,
         parse_mode: "Markdown",
       });
 
-      // Get direct download link from Telegram
-      const fileRes = await tgSend(token, "getFile", { file_id: doc.file_id });
-      if (!fileRes.ok || !fileRes.result?.file_path) {
-        await tgSend(token, "sendMessage", {
-          chat_id: chatId,
-          text: "❌ Failed to retrieve file link from Telegram. Please re-upload your `boot.img`.",
-        });
-        return;
-      }
-
-      const fileUrl = `https://api.telegram.org/file/bot${token}/${fileRes.result.file_path}`;
-
       // Dispatch GitHub Actions workflow
       const dispatchOk = await dispatchGitHubAction(env, {
-        boot_img_url:   fileUrl,
         chat_id:        String(chatId),
+        message_id:     String(uploadMsgId),
         kernel_variant: flavour,
         kernel_repo:    kRepo,
         stock_kernel:   "Android GKI",
+        device_target:  "peridot",
       });
 
       if (!dispatchOk) {
@@ -268,71 +212,21 @@ async function handleUpdate(update, env) {
 
 // ── Binary Parser Helper ────────────────────────────────────────────────────
 
-function parseBootBuffer(arrayBuffer, totalSize, defaultInfo) {
-  const info = { ...defaultInfo };
+function parseBootBuffer(arrayBuffer, totalSize) {
+  const info = {
+    format: "Android Boot Image",
+    kernel_short: "Unknown",
+  };
   const bytes = new Uint8Array(arrayBuffer);
-  const view = new DataView(arrayBuffer);
 
-  // Check Magic
-  const magic = String.fromCharCode(...bytes.slice(0, 8));
-  if (magic.startsWith("ANDROID!")) {
-    const v = bytes[40];
-    info.format = v !== undefined && v <= 4 ? `Android Boot v${v}` : "Android Boot Image";
-    if (bytes.length >= 48) {
-      const osVal = view.getUint32(44, true);
-      if (osVal !== 0) {
-        const a = (osVal >> 25) & 0x7F;
-        const b = (osVal >> 18) & 0x7F;
-        const c = (osVal >> 11) & 0x7F;
-        info.os_version = `${a}.${b}.${c}`;
-        const y = ((osVal >> 4) & 0x7F) + 2000;
-        const m = osVal & 0x0F;
-        info.os_patch_level = `${y}-${String(m).padStart(2, "0")}`;
-      }
-    }
-  } else if (magic.startsWith("VNDR")) {
-    info.format = "Vendor Boot Image";
-  }
-
-  // Text string search for Linux kernel banner
   const textDecoder = new TextDecoder("utf-8", { fatal: false, ignoreBOM: true });
   const str = textDecoder.decode(bytes);
 
   const bannerMatch = str.match(/Linux version ([^\x00\r\n]+)/);
   if (bannerMatch) {
-    info.kernel_banner = "Linux version " + bannerMatch[1].trim();
     const verNum = bannerMatch[1].match(/(\d+\.\d+\.\d+[\w.-]*)/);
     if (verNum) {
       info.kernel_short = verNum[1];
-    }
-  }
-
-  // Architecture check
-  if (str.includes("aarch64") || str.includes("ARM64") || str.includes("ARM aarch64")) {
-    info.arch = "arm64 (AArch64)";
-  } else if (str.includes("ARM") || str.includes("armv7")) {
-    info.arch = "arm32 (ARMv7)";
-  } else if (str.includes("x86_64")) {
-    info.arch = "x86_64";
-  }
-
-  // Compression signatures
-  for (let i = 0; i < bytes.length - 4; i++) {
-    if (bytes[i] === 0x1f && bytes[i + 1] === 0x8b && bytes[i + 2] === 0x08) {
-      info.compression = "gzip";
-      break;
-    }
-    if (bytes[i] === 0x02 && bytes[i + 1] === 0x21 && bytes[i + 2] === 0x4c && bytes[i + 3] === 0x18) {
-      info.compression = "lz4";
-      break;
-    }
-    if (bytes[i] === 0x28 && bytes[i + 1] === 0xb5 && bytes[i + 2] === 0x2f && bytes[i + 3] === 0xfd) {
-      info.compression = "zstd";
-      break;
-    }
-    if (bytes[i] === 0xfd && bytes[i + 1] === 0x37 && bytes[i + 2] === 0x7a && bytes[i + 3] === 0x58) {
-      info.compression = "xz";
-      break;
     }
   }
 
