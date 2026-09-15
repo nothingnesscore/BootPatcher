@@ -239,10 +239,53 @@ jobs:
               unzip -q kernel_release.zip -d ak3/
               ARTIFACT_NAME="Release: $(echo "$RELEASE_JSON" | jq -r .tag_name)"
             else
-              echo "ERROR: Kernel artifact for ${VARIANT} not found in ${KERNEL_REPO}!"
-              ERR_MSG="❌ No active \`${VARIANT}\` build found in \`${KERNEL_REPO}\`."
-              if [ -n "${STATUS_ID}" ]; then
-                python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "${ERR_MSG}"
+              echo "No cached artifact or release found in ${KERNEL_REPO}."
+              echo "Checking if BruhKernel Build (kernel-custom.yml) is currently running or can be dispatched..."
+
+              ACTIVE_RUN=$(curl -s "https://api.github.com/repos/${KERNEL_REPO}/actions/workflows/kernel-custom.yml/runs?status=in_progress&per_page=1" \
+                -H "Authorization: Bearer ${GH_TOKEN}" \
+                -H "Accept: application/vnd.github+json" | jq -r '.workflow_runs[0] // empty')
+
+              if [ -n "$ACTIVE_RUN" ] && [ "$ACTIVE_RUN" != "null" ]; then
+                RUN_URL=$(echo "$ACTIVE_RUN" | jq -r '.html_url // empty')
+                RUN_ID_BK=$(echo "$ACTIVE_RUN" | jq -r '.id // empty')
+                echo "A BruhKernel Build is already in progress: $RUN_URL (ID: $RUN_ID_BK)"
+                if [ -n "${STATUS_ID}" ]; then
+                  python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "⚡ *BruhKernel Build In Progress*
+━━━━━━━━━━━━━━━━━━━━
+📱 *Target Device:* \`${{ inputs.device_target || 'peridot' }}\` / GKI 2.0
+📦 *Flavour:* \`${VARIANT}\`
+⏳ *Status:* Kernel is currently compiling in BruhKernel!
+🔗 [Watch BruhKernel Build](${RUN_URL})"
+                fi
+              else
+                echo "Enquiring / triggering on-demand BruhKernel Build for ${VARIANT}..."
+                TARGET_STR="android14-6.1.138 (2025-06)"
+                DISPATCH_CODE=$(curl -s -w "%{http_code}" -o /dev/null -X POST \
+                  "https://api.github.com/repos/${KERNEL_REPO}/actions/workflows/kernel-custom.yml/dispatches" \
+                  -H "Authorization: Bearer ${GH_TOKEN}" \
+                  -H "Accept: application/vnd.github+json" \
+                  -H "X-GitHub-Api-Version: 2022-11-28" \
+                  -d "{\"ref\":\"main\",\"inputs\":{\"kernel_target\":\"${TARGET_STR}\",\"ksu_variant\":\"${VARIANT}\",\"add_susfs\":true,\"add_zeromount\":true}}")
+
+                echo "BruhKernel dispatch HTTP status: $DISPATCH_CODE"
+                if [ "$DISPATCH_CODE" = "204" ]; then
+                  echo "Successfully enquired and triggered BruhKernel Build!"
+                  if [ -n "${STATUS_ID}" ]; then
+                    python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "🚀 *Dispatched BruhKernel Build*
+━━━━━━━━━━━━━━━━━━━━
+📱 *Target Device:* \`${{ inputs.device_target || 'peridot' }}\` / GKI 2.0
+📦 *Flavour:* \`${VARIANT}\`
+⏳ *Status:* On-demand kernel build dispatched in BruhKernel!
+🔗 [BruhKernel Actions](https://github.com/${KERNEL_REPO}/actions)"
+                  fi
+                else
+                  ERR_MSG="❌ No pre-built \`${VARIANT}\` artifact found in \`${KERNEL_REPO}\`, and dispatch returned status ${DISPATCH_CODE}."
+                  if [ -n "${STATUS_ID}" ]; then
+                    python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "${ERR_MSG}"
+                  fi
+                  exit 1
+                fi
               fi
               exit 1
             fi

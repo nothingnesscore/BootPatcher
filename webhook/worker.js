@@ -38,10 +38,12 @@ async function handleUpdate(update, env) {
     return;
   }
 
-  // 1. Handle Commands
+  // 1. Handle Commands (with @botname stripping for group chat compatibility)
   if (update.message && update.message.text) {
-    const text = update.message.text.trim();
+    let text = update.message.text.trim();
     const chatId = update.message.chat.id;
+    // Strip @BotUsername if invoked in groups (e.g. /start@BootPatcherBot -> /start)
+    text = text.replace(/@\w+Bot\b/i, "");
 
     if (text.startsWith("/start")) {
       const msg =
@@ -72,56 +74,202 @@ async function handleUpdate(update, env) {
     }
   }
 
-  // 2. Handle File Upload (boot.img)
-  if (update.message && update.message.document) {
-    const doc = update.message.document;
-    const chatId = update.message.chat.id;
-    const msgId = update.message.message_id;
-    const fname = doc.file_name || "boot.img";
-    const sizeMb = (doc.file_size / (1024 * 1024)).toFixed(2);
+  // 2. Reject Non-Document Media (GIF animations, photos, videos, stickers, audio)
+  if (update.message) {
+    const msg = update.message;
+    const chatId = msg.chat.id;
+    const msgId = msg.message_id;
 
-    const lower = fname.toLowerCase();
-    if (!lower.endsWith(".img") && !lower.includes("boot")) {
+    let mediaType = null;
+    let mediaDetail = null;
+
+    if (msg.animation) {
+      mediaType = "GIF Animation";
+      mediaDetail = msg.animation.file_name || "Meme GIF / MP4 Clip";
+    } else if (msg.photo) {
+      mediaType = "Photo / Image";
+      mediaDetail = "Compressed Photo";
+    } else if (msg.video) {
+      mediaType = "Video";
+      mediaDetail = msg.video.file_name || "Video File";
+    } else if (msg.sticker) {
+      mediaType = "Sticker";
+      mediaDetail = msg.sticker.emoji ? `Sticker (${msg.sticker.emoji})` : "Sticker";
+    } else if (msg.voice) {
+      mediaType = "Voice Message";
+      mediaDetail = "Voice Audio";
+    } else if (msg.audio) {
+      mediaType = "Audio";
+      mediaDetail = msg.audio.file_name || "Audio Track";
+    }
+
+    if (mediaType) {
+      const rejectMsg =
+        `⚠️ *Upload Rejected by BootPatcher*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `🤖 *Bot:* \`BootPatcher\`\n` +
+        `📦 *Detected Media:* \`${mediaType}\` (${mediaDetail})\n` +
+        `❌ *Reason:* BootPatcher only processes raw Android boot images.\n\n` +
+        `📋 *How to send your boot image:*\n` +
+        `1️⃣ Tap 📎 (Attachment) in Telegram\n` +
+        `2️⃣ Choose **File / Document** (DO NOT send as Photo, Video, or GIF)\n` +
+        `3️⃣ Ensure the file has an \`.img\` extension (e.g. \`boot.img\` or \`init_boot.img\`)`;
+
       await tgSend(token, "sendMessage", {
         chat_id: chatId,
-        text: "⚠️ Please upload a valid `boot.img` file (ends in `.img` or contains `boot`).",
+        text: rejectMsg,
         parse_mode: "Markdown",
         reply_parameters: { message_id: msgId },
       });
       return;
     }
 
-    // Query available flavour versions from GitHub API in parallel
-    const versions = await fetchFlavourVersions(kRepo, env.GITHUB_TOKEN);
+    // 3. Handle Document / File Upload with Strict boot.img Validation
+    if (msg.document) {
+      const doc = msg.document;
+      const fname = doc.file_name;
+      const mime = (doc.mime_type || "").toLowerCase();
+      const sizeBytes = doc.file_size || 0;
+      const sizeMb = (sizeBytes / (1024 * 1024)).toFixed(2);
 
-    // Build keyboard with upload message_id: `p:${flavour}:${msgId}`
-    const keyboard = BASE_FLAVOURS.map((f) => {
-      const ver = versions[f.id] || "6.1.138";
-      return [
-        {
-          text: `${f.label} (${ver})`,
-          callback_data: `p:${f.id}:${msgId}`,
-        },
+      // (a) Must have a declared file name
+      if (!fname) {
+        await tgSend(token, "sendMessage", {
+          chat_id: chatId,
+          text:
+            `⚠️ *Upload Rejected by BootPatcher*\n` +
+            `━━━━━━━━━━━━━━━━━━━━\n` +
+            `🤖 *Bot:* \`BootPatcher\`\n` +
+            `📄 *Detected:* \`Unnamed Stream\` (${mime || "raw"})\n` +
+            `❌ *Reason:* No file name detected.\n\n` +
+            `👉 Please send your stock Android boot image as a named file ending with \`.img\` (e.g. \`boot.img\`).`,
+          parse_mode: "Markdown",
+          reply_parameters: { message_id: msgId },
+        });
+        return;
+      }
+
+      const lower = fname.toLowerCase();
+
+      // (b) Reject media MIME types sent as documents
+      if (
+        mime.startsWith("image/") ||
+        mime.startsWith("video/") ||
+        mime.startsWith("audio/") ||
+        mime.startsWith("text/")
+      ) {
+        await tgSend(token, "sendMessage", {
+          chat_id: chatId,
+          text:
+            `⚠️ *Upload Rejected by BootPatcher*\n` +
+            `━━━━━━━━━━━━━━━━━━━━\n` +
+            `🤖 *Bot:* \`BootPatcher\`\n` +
+            `📄 *File:* \`${fname}\`\n` +
+            `📦 *Detected Type:* \`${mime}\`\n` +
+            `❌ *Reason:* This file is an image/video/media file, not an Android boot image.\n\n` +
+            `👉 Please send your actual stock \`boot.img\` or \`init_boot.img\` extracted from your ROM.`,
+          parse_mode: "Markdown",
+          reply_parameters: { message_id: msgId },
+        });
+        return;
+      }
+
+      // (c) Blacklist of known non-boot extensions
+      const invalidExts = [
+        ".gif", ".mp4", ".mov", ".avi", ".mkv", ".webm",
+        ".png", ".jpg", ".jpeg", ".webp", ".svg", ".bmp",
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".xz", ".bz2",
+        ".apk", ".exe", ".msi", ".dmg", ".iso", ".pdf",
+        ".txt", ".log", ".json", ".xml", ".py", ".sh", ".bat", ".js"
       ];
-    });
+      for (const ext of invalidExts) {
+        if (lower.endsWith(ext)) {
+          await tgSend(token, "sendMessage", {
+            chat_id: chatId,
+            text:
+              `⚠️ *Upload Rejected by BootPatcher*\n` +
+              `━━━━━━━━━━━━━━━━━━━━\n` +
+              `🤖 *Bot:* \`BootPatcher\`\n` +
+              `📄 *File:* \`${fname}\`\n` +
+              `📦 *Extension:* \`${ext}\`\n` +
+              `❌ *Reason:* Files ending in \`${ext}\` are not boot images.\n\n` +
+              `👉 Please send an uncompressed \`boot.img\` or \`init_boot.img\` file.`,
+            parse_mode: "Markdown",
+            reply_parameters: { message_id: msgId },
+          });
+          return;
+        }
+      }
 
-    const promptMsg =
-      `📦 *Stock Boot Image Received*\n` +
-      `━━━━━━━━━━━━━━━━━━━━\n` +
-      `📄 *File:* \`${fname}\`\n` +
-      `💾 *Size:* \`${sizeMb} MB\`\n` +
-      `📱 *Target Device:* Poco F6 (\`peridot\`) / GKI 2.0\n` +
-      `⚡ *Patching Engine:* \`magiskboot\`\n\n` +
-      `👉 *Select your desired BruhKernel flavour:*`;
+      // (d) Must end in .img (or .bin / .raw if named boot)
+      const isValidBootExt = lower.endsWith(".img") || ((lower.endsWith(".bin") || lower.endsWith(".raw")) && lower.includes("boot"));
+      if (!isValidBootExt) {
+        await tgSend(token, "sendMessage", {
+          chat_id: chatId,
+          text:
+            `⚠️ *Upload Rejected by BootPatcher*\n` +
+            `━━━━━━━━━━━━━━━━━━━━\n` +
+            `🤖 *Bot:* \`BootPatcher\`\n` +
+            `📄 *File:* \`${fname}\`\n` +
+            `❌ *Reason:* File must have an \`.img\` extension (e.g. \`boot.img\`).\n\n` +
+            `👉 Please ensure you are sending your partition image file.`,
+          parse_mode: "Markdown",
+          reply_parameters: { message_id: msgId },
+        });
+        return;
+      }
 
-    await tgSend(token, "sendMessage", {
-      chat_id: chatId,
-      text: promptMsg,
-      parse_mode: "Markdown",
-      reply_parameters: { message_id: msgId },
-      reply_markup: { inline_keyboard: keyboard },
-    });
-    return;
+      // (e) Size check: Android boot images are at least 8 MB (typically 32MB–128MB)
+      if (sizeBytes < 4 * 1024 * 1024) {
+        await tgSend(token, "sendMessage", {
+          chat_id: chatId,
+          text:
+            `⚠️ *Upload Rejected by BootPatcher*\n` +
+            `━━━━━━━━━━━━━━━━━━━━\n` +
+            `🤖 *Bot:* \`BootPatcher\`\n` +
+            `📄 *File:* \`${fname}\`\n` +
+            `💾 *Size:* \`${sizeMb} MB\`\n` +
+            `❌ *Reason:* File is too small (< 4 MB) to be a valid Android boot image.\n\n` +
+            `👉 Modern Android boot images are typically 32 MB to 128 MB.`,
+          parse_mode: "Markdown",
+          reply_parameters: { message_id: msgId },
+        });
+        return;
+      }
+
+      // Valid Boot Image: Query BruhKernel build versions and show interactive buttons
+      const versions = await fetchFlavourVersions(kRepo, env.GITHUB_TOKEN);
+
+      // Build keyboard with upload message_id: `p:${flavour}:${msgId}`
+      const keyboard = BASE_FLAVOURS.map((f) => {
+        const ver = versions[f.id] || "6.1.138";
+        return [
+          {
+            text: `${f.label} (${ver})`,
+            callback_data: `p:${f.id}:${msgId}`,
+          },
+        ];
+      });
+
+      const promptMsg =
+        `📦 *Stock Boot Image Received*\n` +
+        `━━━━━━━━━━━━━━━━━━━━\n` +
+        `🤖 *Bot:* \`BootPatcher\`\n` +
+        `📄 *File:* \`${fname}\`\n` +
+        `💾 *Size:* \`${sizeMb} MB\`\n` +
+        `📱 *Target Device:* Poco F6 (\`peridot\`) / GKI 2.0\n` +
+        `⚡ *Patching Engine:* \`magiskboot\`\n\n` +
+        `👉 *Select your desired BruhKernel flavour:*`;
+
+      await tgSend(token, "sendMessage", {
+        chat_id: chatId,
+        text: promptMsg,
+        parse_mode: "Markdown",
+        reply_parameters: { message_id: msgId },
+        reply_markup: { inline_keyboard: keyboard },
+      });
+      return;
+    }
   }
 
   // 3. Handle Flavour Button Selection (Callback Query)

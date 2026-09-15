@@ -361,18 +361,126 @@ async def handle_document(event):
         return
 
     msg = event.message
+
+    # 1. Reject non-document media (GIFs, photos, videos, stickers, voice, audio)
+    media_type = None
+    media_detail = None
+
+    if getattr(msg, "gif", False) or (msg.document and any(getattr(a, "mime_type", "").startswith("image/gif") for a in getattr(msg.document, "attributes", []))):
+        media_type = "GIF Animation"
+        media_detail = "Meme GIF / Animation"
+    elif msg.photo:
+        media_type = "Photo / Image"
+        media_detail = "Compressed Photo"
+    elif msg.video:
+        media_type = "Video"
+        media_detail = "Video File"
+    elif msg.sticker:
+        media_type = "Sticker"
+        media_detail = "Sticker"
+    elif msg.voice:
+        media_type = "Voice Message"
+        media_detail = "Voice Audio"
+    elif msg.audio:
+        media_type = "Audio"
+        media_detail = "Audio Track"
+
+    if media_type:
+        reject_msg = (
+            "⚠️ **Upload Rejected by BootPatcher**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 **Bot:** `BootPatcher`\n"
+            f"📦 **Detected Media:** `{media_type}` ({media_detail})\n"
+            "❌ **Reason:** BootPatcher only processes raw Android boot images.\n\n"
+            "📋 **How to send your boot image:**\n"
+            "1️⃣ Tap 📎 (Attachment) in Telegram\n"
+            "2️⃣ Choose **File / Document** (DO NOT send as Photo, Video, or GIF)\n"
+            "3️⃣ Ensure the file has an `.img` extension (e.g. `boot.img` or `init_boot.img`)"
+        )
+        await event.reply(reject_msg)
+        return
+
+    # 2. Strict document validation
     if not msg.document:
         return
 
-    fname = "boot.img"
+    fname = None
     for attr in msg.document.attributes:
         if hasattr(attr, "file_name") and attr.file_name:
             fname = attr.file_name
             break
 
+    mime = (getattr(msg.document, "mime_type", "") or "").lower()
+    size_bytes = msg.document.size or 0
+    size_mb = round(size_bytes / (1024 * 1024), 2)
+
+    if not fname:
+        await event.reply(
+            "⚠️ **Upload Rejected by BootPatcher**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 **Bot:** `BootPatcher`\n"
+            f"📄 **Detected:** `Unnamed Stream` ({mime or 'raw'})\n"
+            "❌ **Reason:** No file name detected.\n\n"
+            "👉 Please send your stock Android boot image as a named file ending with `.img` (e.g. `boot.img`)."
+        )
+        return
+
     lower = fname.lower()
-    if not (lower.endswith(".img") or "boot" in lower):
-        await event.reply("⚠️ Please upload a valid `boot.img` file (ends in `.img` or named `boot`).")
+
+    if mime.startswith(("image/", "video/", "audio/", "text/")):
+        await event.reply(
+            "⚠️ **Upload Rejected by BootPatcher**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 **Bot:** `BootPatcher`\n"
+            f"📄 **File:** `{fname}`\n"
+            f"📦 **Detected Type:** `{mime}`\n"
+            "❌ **Reason:** This file is an image/video/media file, not an Android boot image.\n\n"
+            "👉 Please send your actual stock `boot.img` or `init_boot.img` extracted from your ROM."
+        )
+        return
+
+    invalid_exts = [
+        ".gif", ".mp4", ".mov", ".avi", ".mkv", ".webm",
+        ".png", ".jpg", ".jpeg", ".webp", ".svg", ".bmp",
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".xz", ".bz2",
+        ".apk", ".exe", ".msi", ".dmg", ".iso", ".pdf",
+        ".txt", ".log", ".json", ".xml", ".py", ".sh", ".bat", ".js"
+    ]
+    for ext in invalid_exts:
+        if lower.endswith(ext):
+            await event.reply(
+                "⚠️ **Upload Rejected by BootPatcher**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "🤖 **Bot:** `BootPatcher`\n"
+                f"📄 **File:** `{fname}`\n"
+                f"📦 **Extension:** `{ext}`\n"
+                f"❌ **Reason:** Files ending in `{ext}` are not boot images.\n\n"
+                "👉 Please send an uncompressed `boot.img` or `init_boot.img` file."
+            )
+            return
+
+    is_valid_boot_ext = lower.endswith(".img") or ((lower.endswith(".bin") or lower.endswith(".raw")) and "boot" in lower)
+    if not is_valid_boot_ext:
+        await event.reply(
+            "⚠️ **Upload Rejected by BootPatcher**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 **Bot:** `BootPatcher`\n"
+            f"📄 **File:** `{fname}`\n"
+            "❌ **Reason:** File must have an `.img` extension (e.g. `boot.img`).\n\n"
+            "👉 Please ensure you are sending your partition image file."
+        )
+        return
+
+    if size_bytes < 4 * 1024 * 1024:
+        await event.reply(
+            "⚠️ **Upload Rejected by BootPatcher**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🤖 **Bot:** `BootPatcher`\n"
+            f"📄 **File:** `{fname}`\n"
+            f"💾 **Size:** `{size_mb} MB`\n"
+            "❌ **Reason:** File is too small (< 4 MB) to be a valid Android boot image.\n\n"
+            "👉 Modern Android boot images are typically 32 MB to 128 MB."
+        )
         return
 
     chat_id = event.chat_id
