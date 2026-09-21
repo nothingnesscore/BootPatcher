@@ -7,6 +7,7 @@ import os
 import sys
 import asyncio
 from telethon import TelegramClient
+from telethon.tl.types import DocumentAttributeFilename
 
 # Add project root and module dir to sys.path for robust importing
 _current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +77,9 @@ async def upload_file(
                     stage_max_pct=99,
                 )
 
+        file_name = os.path.basename(file_path)
+        doc_attrs = [DocumentAttributeFilename(file_name=file_name)]
+
         # Attempt upload with markdown formatting first; fallback to raw text if entity parsing fails
         try:
             await client.send_file(
@@ -83,6 +87,7 @@ async def upload_file(
                 file_path,
                 caption=caption,
                 parse_mode="md",
+                attributes=doc_attrs,
                 progress_callback=progress,
             )
         except Exception as e:
@@ -92,6 +97,7 @@ async def upload_file(
                 file_path,
                 caption=caption,
                 parse_mode=None,
+                attributes=doc_attrs,
                 progress_callback=progress,
             )
 

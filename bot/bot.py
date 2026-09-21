@@ -578,7 +578,7 @@ async def handle_callback(event):
         f"💉 **Injecting:** {flavour_title}\n"
         f"🌐 **Kernel Source:** `{kernel_repo}`\n\n"
         f"⏳ Staging boot image and starting clean Linux runner...\n"
-        f"You will receive live inspection and your final `patched_boot.img` in 3–5 minutes! ☕"
+        f"You will receive live auto-detection and your final `{info['kernel_short']}_{flavour.lower()}.img` in 3–5 minutes! ☕"
     )
 
     try:

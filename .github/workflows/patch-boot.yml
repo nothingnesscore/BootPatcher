@@ -119,15 +119,21 @@ jobs:
           CHAT_ID: ${{ inputs.chat_id }}
           STATUS_ID: ${{ inputs.status_message_id }}
         run: |
-          ./magiskboot unpack stock_boot.img || true
+          ./magiskboot unpack -h stock_boot.img || true
 
           FORMAT="Android Boot Image"
           OS_VER="14.0"
           PATCH_LVL="Unknown"
           if [ -f header ]; then
-            FORMAT=$(grep "^format=" header | cut -d= -f2 || echo "Boot")
-            OS_VER=$(grep "^os_version=" header | cut -d= -f2 || echo "Unknown")
-            PATCH_LVL=$(grep "^os_patch_level=" header | cut -d= -f2 || echo "Unknown")
+            FORMAT=$(grep "^format=" header | cut -d= -f2 | xargs || echo "Boot")
+            OS_VER_RAW=$(grep "^os_version=" header | cut -d= -f2 | xargs || echo "Unknown")
+            PATCH_LVL_RAW=$(grep "^os_patch_level=" header | cut -d= -f2 | xargs || echo "Unknown")
+            if [ -n "$OS_VER_RAW" ] && [ "$OS_VER_RAW" != "Unknown" ]; then
+              OS_VER="$OS_VER_RAW"
+            fi
+            if [ -n "$PATCH_LVL_RAW" ] && [ "$PATCH_LVL_RAW" != "Unknown" ]; then
+              PATCH_LVL=$(echo "$PATCH_LVL_RAW" | grep -oP '^[0-9]{4}-[0-9]{2}' || echo "$PATCH_LVL_RAW")
+            fi
           fi
 
           STOCK_UNAME="Unknown"
@@ -137,7 +143,7 @@ jobs:
 
           if [ -f kernel ]; then
             STOCK_UNAME=$(strings kernel | grep -m1 "Linux version" || echo "Unknown")
-            KERNEL_VER=$(echo "$STOCK_UNAME" | grep -oP "Linux version \K[0-9]+\.[0-9]+\.[0-9]+" || echo "6.1")
+            KERNEL_VER=$(echo "$STOCK_UNAME" | grep -oP "Linux version \K[0-9]+\.[0-9]+(\.[0-9]+)?" || echo "6.1.138")
             if strings kernel | grep -q "aarch64"; then
               ARCH="arm64 (AArch64)"
             elif strings kernel | grep -q "ARM"; then
@@ -146,13 +152,28 @@ jobs:
             COMPRESSION=$(file kernel | cut -d: -f2- | xargs)
           fi
 
+          # Fallback check for SPL in strings if header did not report it
+          if [ "$PATCH_LVL" = "Unknown" ] || [ -z "$PATCH_LVL" ]; then
+            FALLBACK_SPL=$(strings stock_boot.img | grep -m1 -oP '20[2-3][0-9]-(0[1-9]|1[0-2])' || echo "Unknown")
+            if [ "$FALLBACK_SPL" != "Unknown" ]; then
+              PATCH_LVL="$FALLBACK_SPL"
+            fi
+          fi
+
+          OS_MAJOR=$(echo "$OS_VER" | grep -oP '^[0-9]+' || echo "14")
+          VARIANT_LOWER=$(echo "${{ inputs.kernel_variant }}" | tr '[:upper:]' '[:lower:]')
+          OUT_BOOT_IMG="${KERNEL_VER}_${VARIANT_LOWER}.img"
+
           echo "STOCK_UNAME=${STOCK_UNAME}" >> $GITHUB_ENV
           echo "KERNEL_VER=${KERNEL_VER}" >> $GITHUB_ENV
           echo "OS_VER=${OS_VER}" >> $GITHUB_ENV
+          echo "OS_MAJOR=${OS_MAJOR}" >> $GITHUB_ENV
           echo "PATCH_LVL=${PATCH_LVL}" >> $GITHUB_ENV
           echo "ARCH=${ARCH}" >> $GITHUB_ENV
           echo "FORMAT=${FORMAT}" >> $GITHUB_ENV
           echo "COMPRESSION=${COMPRESSION}" >> $GITHUB_ENV
+          echo "VARIANT_LOWER=${VARIANT_LOWER}" >> $GITHUB_ENV
+          echo "OUT_BOOT_IMG=${OUT_BOOT_IMG}" >> $GITHUB_ENV
 
           # Clean up temporary unpack before clean patching
           rm -f kernel ramdisk* dtb* extra second recovery_dtbo
@@ -169,8 +190,9 @@ jobs:
           🗜️ *Boot Format:* \`Boot ${FORMAT}\`
           ━━━━━━━━━━━━━━━━━━━━
           📦 *Target Flavour:* \`${{ inputs.kernel_variant }}\`
+          🏷️ *Target Output:* \`${OUT_BOOT_IMG}\`
           🔄 *Progress:* \`[■■■■■□□□□□] 50%\`
-          ⏳ *Status:* Stock boot inspected! Querying BruhKernel builds...
+          ⏳ *Status:* Stock boot inspected! Matching BruhKernel builds...
           🔗 [Live Runner Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           fi
 
@@ -184,105 +206,108 @@ jobs:
           CHAT_ID: ${{ inputs.chat_id }}
           STATUS_ID: ${{ inputs.status_message_id }}
         run: |
-          echo "Searching artifacts in ${KERNEL_REPO} for variant: ${VARIANT}"
+          echo "================================================="
+          echo "Auto-Detected Specs from Stock Boot Image:"
+          echo "  • Kernel Version:       ${KERNEL_VER}"
+          echo "  • Android Version:      ${OS_VER} (Major: ${OS_MAJOR})"
+          echo "  • Security Patch Level: ${PATCH_LVL}"
+          echo "  • Architecture:         ${ARCH}"
+          echo "  • Target Flavour:       ${VARIANT}"
+          echo "  • Output Boot Image:    ${OUT_BOOT_IMG}"
+          echo "================================================="
+
+          echo "Searching artifacts in ${KERNEL_REPO} for strictly matching build..."
 
           ARTIFACT_JSON=$(curl -s \
             "https://api.github.com/repos/${KERNEL_REPO}/actions/artifacts?per_page=100" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json")
 
-          DEVICE="${{ inputs.device_target }}"
-          ARTIFACT=""
-
-          # 1. First attempt: match variant AND device target (e.g. peridot) if specified
-          if [ -n "$DEVICE" ]; then
-            echo "Searching for device-specific build matching: ${DEVICE} + ${VARIANT}"
-            ARTIFACT=$(echo "$ARTIFACT_JSON" | jq -r \
-              --arg v "$VARIANT" \
-              --arg d "$DEVICE" \
-              '[.artifacts[] | select(
-                (.name | test($v; "i")) and
-                (.name | test($d; "i")) and
-                (.name | test("AnyKernel3"; "i")) and
-                (.expired == false)
-              )] | sort_by(.created_at) | last // empty')
-          fi
-
-          # 2. Fallback: match any non-expired AnyKernel3 build for the requested variant
-          if [ -z "$ARTIFACT" ] || [ "$ARTIFACT" = "null" ]; then
-            echo "Selecting latest universal/GKI build for: ${VARIANT}"
-            ARTIFACT=$(echo "$ARTIFACT_JSON" | jq -r \
-              --arg v "$VARIANT" \
-              '[.artifacts[] | select(
-                (.name | test($v; "i")) and
-                (.name | test("AnyKernel3"; "i")) and
-                (.expired == false)
-              )] | sort_by(.created_at) | last // empty')
-          fi
+          # Strict filter: Must match Variant + AnyKernel3 + Kernel Version + SPL + Android Major
+          ARTIFACT=$(echo "$ARTIFACT_JSON" | jq -r \
+            --arg v "$VARIANT" \
+            --arg kv "$KERNEL_VER" \
+            --arg spl "$PATCH_LVL" \
+            --arg a "$OS_MAJOR" \
+            '[.artifacts[] | select(
+              (.expired == false) and
+              (.name | test("AnyKernel3"; "i")) and
+              (.name | test($v; "i")) and
+              (.name | test("(^|[^0-9.])" + $kv + "([^0-9.]|$)")) and
+              (if $spl != "Unknown" and $spl != "" then (.name | contains($spl)) else true end) and
+              (if $a != "Unknown" and $a != "" then (.name | test("android" + $a + "|a" + $a; "i")) else true end)
+            )] | sort_by(.created_at) | last // empty')
 
           ARTIFACT_NAME=$(echo "$ARTIFACT" | jq -r '.name // empty')
           ARTIFACT_URL=$(echo "$ARTIFACT" | jq -r '.archive_download_url // empty')
 
           if [ -z "$ARTIFACT_NAME" ]; then
-            echo "No matching artifact found in GitHub Actions. Checking GitHub Releases..."
-            RELEASE_JSON=$(curl -s "https://api.github.com/repos/${KERNEL_REPO}/releases/latest" \
+            echo "No matching artifact in GitHub Actions cache for ${KERNEL_VER} (SPL: ${PATCH_LVL})."
+            echo "Checking GitHub Releases for exact match..."
+            RELEASE_JSON=$(curl -s "https://api.github.com/repos/${KERNEL_REPO}/releases" \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json")
+
             ASSET_URL=$(echo "$RELEASE_JSON" | jq -r \
               --arg v "$VARIANT" \
-              '.assets[] | select(.name | test($v; "i")) | .browser_download_url' | head -1)
+              --arg kv "$KERNEL_VER" \
+              --arg spl "$PATCH_LVL" \
+              '[.[].assets[] | select(
+                (.name | test($v; "i")) and
+                (.name | test("(^|[^0-9.])" + $kv + "([^0-9.]|$)")) and
+                (if $spl != "Unknown" and $spl != "" then (.name | contains($spl)) else true end)
+              )] | first | .browser_download_url // empty')
 
             if [ -n "$ASSET_URL" ]; then
-              echo "Downloading from release: $ASSET_URL"
+              echo "Downloading strictly matched release asset: $ASSET_URL"
               wget -q "$ASSET_URL" -O kernel_release.zip
               mkdir -p ak3
               unzip -q kernel_release.zip -d ak3/
-              ARTIFACT_NAME="Release: $(echo "$RELEASE_JSON" | jq -r .tag_name)"
+              ARTIFACT_NAME="Release: $(basename "$ASSET_URL")"
             else
-              echo "No cached artifact or release found in ${KERNEL_REPO}."
-              echo "Checking if BruhKernel Build (kernel-custom.yml) is currently running or can be dispatched..."
+              echo "No cached artifact or release matching Linux ${KERNEL_VER} + SPL ${PATCH_LVL} found in ${KERNEL_REPO}."
+              TARGET_STR="android${OS_MAJOR}-${KERNEL_VER} (${PATCH_LVL})"
+              echo "Checking if BruhKernel Build for target '${TARGET_STR}' is running or can be dispatched..."
 
-              ACTIVE_RUN=$(curl -s "https://api.github.com/repos/${KERNEL_REPO}/actions/workflows/kernel-custom.yml/runs?status=in_progress&per_page=1" \
+              ACTIVE_RUN=$(curl -s "https://api.github.com/repos/${KERNEL_REPO}/actions/workflows/kernel-custom.yml/runs?status=in_progress&per_page=5" \
                 -H "Authorization: Bearer ${GH_TOKEN}" \
                 -H "Accept: application/vnd.github+json" | jq -r '.workflow_runs[0] // empty')
 
               if [ -n "$ACTIVE_RUN" ] && [ "$ACTIVE_RUN" != "null" ]; then
                 RUN_URL=$(echo "$ACTIVE_RUN" | jq -r '.html_url // empty')
                 RUN_ID_BK=$(echo "$ACTIVE_RUN" | jq -r '.id // empty')
-                echo "A BruhKernel Build is already in progress: $RUN_URL (ID: $RUN_ID_BK)"
+                echo "A BruhKernel Build is already compiling: $RUN_URL (ID: $RUN_ID_BK)"
                 if [ -n "${STATUS_ID}" ]; then
-                  BK_MSG=$(printf '⚡ *BruhKernel Build In Progress*\n━━━━━━━━━━━━━━━━━━━━\n📱 *Target Device:* `%s` / GKI 2.0\n📦 *Flavour:* `%s`\n⏳ *Status:* Kernel is currently compiling in BruhKernel!\n🔗 [Watch BruhKernel Build](%s)' "${{ inputs.device_target || 'peridot' }}" "${VARIANT}" "${RUN_URL}")
+                  BK_MSG=$(printf '⚡ *BruhKernel Build In Progress*\n━━━━━━━━━━━━━━━━━━━━\n🐧 *Stock Kernel:* `Linux %s`\n🤖 *Android Version:* `Android %s`\n🛡️ *Security Patch Level:* `%s`\n📦 *Flavour:* `%s`\n⏳ *Status:* Kernel is currently compiling in BruhKernel!\n🔗 [Watch BruhKernel Build](%s)' "${KERNEL_VER}" "${OS_VER}" "${PATCH_LVL}" "${VARIANT}" "${RUN_URL}")
                   python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "$BK_MSG"
                 fi
               else
-                echo "Enquiring / triggering on-demand BruhKernel Build for ${VARIANT}..."
-                TARGET_STR="android14-6.1.138 (2025-06)"
+                echo "Enquiring / triggering on-demand BruhKernel Build for ${TARGET_STR} (${VARIANT})..."
                 DISPATCH_CODE=$(curl -s -w "%{http_code}" -o /dev/null -X POST \
                   "https://api.github.com/repos/${KERNEL_REPO}/actions/workflows/kernel-custom.yml/dispatches" \
                   -H "Authorization: Bearer ${GH_TOKEN}" \
                   -H "Accept: application/vnd.github+json" \
                   -H "X-GitHub-Api-Version: 2022-11-28" \
-                  -d "{\"ref\":\"main\",\"inputs\":{\"kernel_target\":\"${TARGET_STR}\",\"ksu_variant\":\"${VARIANT}\",\"add_susfs\":true,\"add_zeromount\":true}}")
+                  -d "{\"ref\":\"main\",\"inputs\":{\"kernel_target\":\"${TARGET_STR}\",\"quick_target\":\"${TARGET_STR}\",\"ksu_variant\":\"${VARIANT}\"}}")
 
                 echo "BruhKernel dispatch HTTP status: $DISPATCH_CODE"
                 if [ "$DISPATCH_CODE" = "204" ]; then
-                  echo "Successfully enquired and triggered BruhKernel Build!"
+                  echo "Successfully dispatched BruhKernel Build for ${TARGET_STR}!"
                   if [ -n "${STATUS_ID}" ]; then
-                    BK_DISP_MSG=$(printf '🚀 *Dispatched BruhKernel Build*\n━━━━━━━━━━━━━━━━━━━━\n📱 *Target Device:* `%s` / GKI 2.0\n📦 *Flavour:* `%s`\n⏳ *Status:* On-demand kernel build dispatched in BruhKernel!\n🔗 [BruhKernel Actions](https://github.com/%s/actions)' "${{ inputs.device_target || 'peridot' }}" "${VARIANT}" "${KERNEL_REPO}")
+                    BK_DISP_MSG=$(printf '🚀 *Dispatched BruhKernel Build*\n━━━━━━━━━━━━━━━━━━━━\n🐧 *Stock Kernel:* `Linux %s`\n🤖 *Android Version:* `Android %s`\n🛡️ *Security Patch Level:* `%s`\n📦 *Flavour:* `%s`\n🎯 *Target:* `%s`\n━━━━━━━━━━━━━━━━━━━━\n⚠️ *Notice:* BootPatcher will never patch a mismatched kernel version or different patch level to prevent device bootloops.\n⏳ *Status:* On-demand build triggered in BruhKernel! Once completed, send your `boot.img` again to receive your patched image.\n🔗 [BruhKernel Actions](https://github.com/%s/actions)' "${KERNEL_VER}" "${OS_VER}" "${PATCH_LVL}" "${VARIANT}" "${TARGET_STR}" "${KERNEL_REPO}")
                     python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "$BK_DISP_MSG"
                   fi
                 else
-                  ERR_MSG="❌ No pre-built \`${VARIANT}\` artifact found in \`${KERNEL_REPO}\`, and dispatch returned status ${DISPATCH_CODE}."
+                  ERR_MSG=$(printf '❌ *Compatibility Mismatch: No Kernel Found*\n━━━━━━━━━━━━━━━━━━━━\n🐧 *Stock Kernel:* `Linux %s`\n🤖 *Android Version:* `Android %s`\n🛡️ *Security Patch Level:* `%s`\n📦 *Requested Flavour:* `%s`\n━━━━━━━━━━━━━━━━━━━━\n⚠️ No matching kernel artifact was found in `%s`, and on-demand dispatch returned HTTP %s.' "${KERNEL_VER}" "${OS_VER}" "${PATCH_LVL}" "${VARIANT}" "${KERNEL_REPO}" "${DISPATCH_CODE}")
                   if [ -n "${STATUS_ID}" ]; then
                     python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "${ERR_MSG}"
                   fi
-                  exit 1
                 fi
               fi
               exit 1
             fi
           else
-            echo "Found artifact: ${ARTIFACT_NAME}"
+            echo "Found strictly matching artifact: ${ARTIFACT_NAME}"
             curl -L -o kernel_artifact.zip \
               -H "Authorization: Bearer ${GH_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
@@ -312,9 +337,19 @@ jobs:
           ls -lh new_kernel
 
           NEW_UNAME=$(strings new_kernel | grep -m1 "Linux version" || echo "Custom GKI")
-          NEW_UNAME_SHORT=$(echo "$NEW_UNAME" | grep -oP "Linux version \K[0-9]+\.[0-9]+\.[0-9]+" || echo "6.1.138")
+          NEW_UNAME_SHORT=$(echo "$NEW_UNAME" | grep -oP "Linux version \K[0-9]+\.[0-9]+(\.[0-9]+)?" || echo "${KERNEL_VER}")
           echo "NEW_UNAME=${NEW_UNAME}" >> $GITHUB_ENV
           echo "NEW_UNAME_SHORT=${NEW_UNAME_SHORT}" >> $GITHUB_ENV
+
+          # Guard check: Ensure kernel version matches
+          if [ "$NEW_UNAME_SHORT" != "$KERNEL_VER" ]; then
+            echo "CRITICAL WARNING: Fetched kernel ($NEW_UNAME_SHORT) does not match stock kernel ($KERNEL_VER)!"
+            MISMATCH_MSG=$(printf '❌ *Version Mismatch Detected!*\n━━━━━━━━━━━━━━━━━━━━\n🐧 *Stock Kernel:* `Linux %s`\n⚠️ *Fetched Kernel:* `Linux %s`\n🚫 Patching halted to protect your device from bootloops.' "${KERNEL_VER}" "${NEW_UNAME_SHORT}")
+            if [ -n "${STATUS_ID}" ]; then
+              python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "${MISMATCH_MSG}"
+            fi
+            exit 1
+          fi
 
           if [ -n "${STATUS_ID}" ]; then
             python3 bot/tg_progress.py "${CHAT_ID}" "${STATUS_ID}" "⚡ *Building Your Patched Boot Image*
@@ -323,10 +358,12 @@ jobs:
           🐧 *Stock Kernel:* \`Linux ${KERNEL_VER}\`
           🆕 *BruhKernel:* \`Linux ${NEW_UNAME_SHORT}\`
           🤖 *Android Version:* \`Android ${OS_VER}\`
+          🛡️ *Patch Level:* \`${PATCH_LVL}\`
           ━━━━━━━━━━━━━━━━━━━━
           📦 *Target Flavour:* \`${{ inputs.kernel_variant }}\`
+          🏷️ *Target Output:* \`${OUT_BOOT_IMG}\`
           🔄 *Progress:* \`[■■■■■■■□□□] 70%\`
-          ⏳ *Status:* Kernel artifact fetched! Repacking boot image...
+          ⏳ *Status:* Kernel artifact fetched! Repacking as \`${OUT_BOOT_IMG}\`...
           🔗 [Live Runner Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           fi
 
@@ -349,16 +386,19 @@ jobs:
           [ -f kernel ] && rm -f kernel
           cp Image kernel
 
-          echo "3. Repacking boot.img..."
-          ../magiskboot repack boot.img
+          echo "3. Repacking boot.img into ${{ env.OUT_BOOT_IMG }}..."
+          ../magiskboot repack boot.img "${{ env.OUT_BOOT_IMG }}" || true
+          if [ ! -f "${{ env.OUT_BOOT_IMG }}" ] && [ -f new-boot.img ]; then
+            mv new-boot.img "${{ env.OUT_BOOT_IMG }}"
+          fi
 
-          if [ ! -f new-boot.img ]; then
-            echo "ERROR: new-boot.img was not generated!"
+          if [ ! -f "${{ env.OUT_BOOT_IMG }}" ]; then
+            echo "ERROR: ${{ env.OUT_BOOT_IMG }} was not generated!"
             exit 1
           fi
 
-          ls -lh new-boot.img
-          echo "Patching successful!"
+          ls -lh "${{ env.OUT_BOOT_IMG }}"
+          echo "Patching successful: ${{ env.OUT_BOOT_IMG }}"
           cd ..
 
           if [ -n "${STATUS_ID}" ]; then
@@ -372,7 +412,7 @@ jobs:
           ━━━━━━━━━━━━━━━━━━━━
           📦 *Target Flavour:* \`${{ inputs.kernel_variant }}\`
           🔄 *Progress:* \`[■■■■■■■■□□] 85%\`
-          ⏳ *Status:* Repacked successfully! Starting MTProto upload...
+          ⏳ *Status:* Repacked as \`${{ env.OUT_BOOT_IMG }}\`! Starting MTProto upload...
           🔗 [Live Runner Log](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})"
           fi
 
@@ -383,7 +423,8 @@ jobs:
           CHAT_ID: ${{ inputs.chat_id }}
           STATUS_ID: ${{ inputs.status_message_id }}
         run: |
-          printf '🎉 *Patched Boot Image Ready!*\n━━━━━━━━━━━━━━━━━━━━\n📱 *Device Profile:* Poco F6 (`%s`) / GKI 2.0\n🐧 *Stock Kernel:* `Linux %s`\n🆕 *BruhKernel:* `Linux %s`\n🤖 *Android Version:* `Android %s`\n🛡️ *Patch Level:* `%s`\n🗜️ *Boot Format:* `Boot %s`\n📦 *Flavour:* `%s`\n🏷️ *Artifact:* `%s`\n━━━━━━━━━━━━━━━━━━━━\n📋 *Quick Flashing Steps:*\n• TWRP/OrangeFox: Install ➔ Install Image ➔ Select file ➔ Flash to `Boot`\n• Fastboot: `fastboot flash boot patched_boot.img`\n🔗 [Runner Log](https://github.com/%s/actions/runs/%s)\n' \
+          printf '🎉 *Patched Boot Image Ready!*\n━━━━━━━━━━━━━━━━━━━━\n📦 *File:* `%s`\n📱 *Device Profile:* Poco F6 (`%s`) / GKI 2.0\n🐧 *Stock Kernel:* `Linux %s`\n🆕 *BruhKernel:* `Linux %s`\n🤖 *Android Version:* `Android %s`\n🛡️ *Patch Level:* `%s`\n🗜️ *Boot Format:* `Boot %s`\n📦 *Flavour:* `%s`\n🏷️ *Artifact:* `%s`\n━━━━━━━━━━━━━━━━━━━━\n📋 *Quick Flashing Steps:*\n• TWRP/OrangeFox: Install ➔ Install Image ➔ Select `%s` ➔ Flash to `Boot`\n• Fastboot: `fastboot flash boot %s`\n🔗 [Runner Log](https://github.com/%s/actions/runs/%s)\n' \
+            "${{ env.OUT_BOOT_IMG }}" \
             "${{ inputs.device_target || 'peridot' }}" \
             "${{ env.KERNEL_VER }}" \
             "${{ env.NEW_UNAME_SHORT }}" \
@@ -392,15 +433,17 @@ jobs:
             "${{ env.FORMAT }}" \
             "${{ inputs.kernel_variant }}" \
             "${{ env.ARTIFACT_NAME }}" \
+            "${{ env.OUT_BOOT_IMG }}" \
+            "${{ env.OUT_BOOT_IMG }}" \
             "${{ github.repository }}" \
             "${{ github.run_id }}" > caption.txt
 
           echo "Uploading via MTProto with dynamic progress updates..."
-          python3 bot/upload_tg.py "${CHAT_ID}" patch_env/new-boot.img caption.txt "${STATUS_ID}" "${{ inputs.kernel_variant }}" "${{ inputs.device_target || 'peridot' }}" || {
+          python3 bot/upload_tg.py "${CHAT_ID}" "patch_env/${{ env.OUT_BOOT_IMG }}" caption.txt "${STATUS_ID}" "${{ inputs.kernel_variant }}" "${{ inputs.device_target || 'peridot' }}" || {
             echo "MTProto upload failed, falling back to Bot API sendDocument..."
             curl -s \
               -F "chat_id=${CHAT_ID}" \
-              -F "document=@patch_env/new-boot.img;filename=patched_boot.img" \
+              -F "document=@patch_env/${{ env.OUT_BOOT_IMG }};filename=${{ env.OUT_BOOT_IMG }}" \
               -F "caption=$(cat caption.txt)" \
               -F "parse_mode=Markdown" \
               "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendDocument"
@@ -413,9 +456,10 @@ jobs:
       - name: Archive Patched boot.img Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: patched_boot_${{ inputs.kernel_variant }}_${{ github.run_id }}
-          path: patch_env/new-boot.img
+          name: boot_${{ env.KERNEL_VER }}_${{ env.VARIANT_LOWER }}_${{ github.run_id }}
+          path: patch_env/${{ env.OUT_BOOT_IMG }}
           retention-days: 1
+
 
       # ── Failure Handler ──────────────────────────────────────────────────
       - name: Telegram Failure Notification

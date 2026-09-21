@@ -258,6 +258,7 @@ async function handleUpdate(update, env) {
         `📄 *File:* \`${fname}\`\n` +
         `💾 *Size:* \`${sizeMb} MB\`\n` +
         `📱 *Target Device:* Poco F6 (\`peridot\`) / GKI 2.0\n` +
+        `🛡️ *Compatibility:* Auto-detects kernel version & SPL from image\n` +
         `⚡ *Patching Engine:* \`magiskboot\`\n\n` +
         `👉 *Select your desired BruhKernel flavour:*`;
 
@@ -360,9 +361,14 @@ async function fetchFlavourVersions(kRepo, ghToken) {
         const name = a.name || "";
         for (const key of Object.keys(versions)) {
           if (name.toLowerCase().includes(key.toLowerCase()) && name.toLowerCase().includes("anykernel3")) {
-            const m = name.match(/(\d+\.\d+\.\d+)/);
+            const m = name.match(/(\d+\.\d+\.\d+).*?(\d{4}-\d{2})/);
             if (m) {
-              versions[key] = m[1];
+              versions[key] = `${m[1]} (${m[2]})`;
+            } else {
+              const mVer = name.match(/(\d+\.\d+\.\d+)/);
+              if (mVer) {
+                versions[key] = mVer[1];
+              }
             }
           }
         }
