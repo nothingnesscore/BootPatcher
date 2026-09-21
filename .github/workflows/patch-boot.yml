@@ -119,13 +119,13 @@ jobs:
           CHAT_ID: ${{ inputs.chat_id }}
           STATUS_ID: ${{ inputs.status_message_id }}
         run: |
-          ./magiskboot unpack -h stock_boot.img || true
+          ./magiskboot unpack stock_boot.img
 
           FORMAT="Android Boot Image"
           OS_VER="14.0"
           PATCH_LVL="Unknown"
           if [ -f header ]; then
-            FORMAT=$(grep "^format=" header | cut -d= -f2 | xargs || echo "Boot")
+            FORMAT=$(grep "^format=" header | cut -d= -f2 | xargs || echo "raw")
             OS_VER_RAW=$(grep "^os_version=" header | cut -d= -f2 | xargs || echo "Unknown")
             PATCH_LVL_RAW=$(grep "^os_patch_level=" header | cut -d= -f2 | xargs || echo "Unknown")
             if [ -n "$OS_VER_RAW" ] && [ "$OS_VER_RAW" != "Unknown" ]; then
@@ -150,14 +150,6 @@ jobs:
               ARCH="arm32"
             fi
             COMPRESSION=$(file kernel | cut -d: -f2- | xargs)
-          fi
-
-          # Fallback check for SPL in strings if header did not report it
-          if [ "$PATCH_LVL" = "Unknown" ] || [ -z "$PATCH_LVL" ]; then
-            FALLBACK_SPL=$(strings stock_boot.img | grep -m1 -oP '20[2-3][0-9]-(0[1-9]|1[0-2])' || echo "Unknown")
-            if [ "$FALLBACK_SPL" != "Unknown" ]; then
-              PATCH_LVL="$FALLBACK_SPL"
-            fi
           fi
 
           OS_MAJOR=$(echo "$OS_VER" | grep -oP '^[0-9]+' || echo "14")
@@ -288,7 +280,7 @@ jobs:
                   -H "Authorization: Bearer ${GH_TOKEN}" \
                   -H "Accept: application/vnd.github+json" \
                   -H "X-GitHub-Api-Version: 2022-11-28" \
-                  -d "{\"ref\":\"main\",\"inputs\":{\"kernel_target\":\"${TARGET_STR}\",\"quick_target\":\"${TARGET_STR}\",\"ksu_variant\":\"${VARIANT}\"}}")
+                  -d "{\"ref\":\"main\",\"inputs\":{\"quick_target\":\"${TARGET_STR}\",\"ksu_variant\":\"${VARIANT}\"}}")
 
                 echo "BruhKernel dispatch HTTP status: $DISPATCH_CODE"
                 if [ "$DISPATCH_CODE" = "204" ]; then
