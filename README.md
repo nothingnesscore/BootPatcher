@@ -5,7 +5,39 @@
 
 ---
 
-## 📖 Newbie Guide: Step-by-Step to a Patched Boot Image
+## 📱 Android App: BootPatcher Mobile
+
+Patch a stock `boot.img` with a BruhKernel GKI kernel **on your phone**, with no PC and no Telegram bot.
+
+* **Built automatically** by [`.github/workflows/build-apk.yml`](.github/workflows/build-apk.yml) on every push that touches the app.
+* **Download** the `BootPatcher-release-apk` artifact from the [Actions page](https://github.com/nothingnesscore/BootPatcher/actions).
+* **Requires Android 11+.** Root is *not* required to patch an image you have already dumped.
+* The patching engine (`magiskboot`, ARM64) is bundled in the app, so patching happens locally and offline.
+
+### How to use it
+
+1. **Get your stock `boot.img`** — the same ways described in the newbie guide below.
+2. **Install the APK** and open BootPatcher.
+3. **Choose your stock `boot.img`.** The app reads the real boot header and shows the header version, Android version, security patch level, kernel version and architecture.
+4. **Search for a matching kernel** on the Flavor tab, or pick a kernel image yourself.
+5. **Tap "Patch boot image".** The patched image is saved to the app's files directory.
+6. **Flash it** with fastboot or a custom recovery, exactly as in the newbie guide.
+
+### 🛡️ Why it refuses to patch
+
+A GKI kernel only boots if it matches your phone's Android version, kernel version **and security patch level**. Flashing a kernel built for a different month is a bootloop.
+
+BootPatcher treats these as hard failures, not warnings. It will not patch when:
+
+* the Android version differs
+* the kernel version differs (`6.1.75` and `6.1.138` are not interchangeable)
+* the **security patch level differs** — this is read from the boot header, not guessed
+* the boot header version differs
+* the architecture differs, or cannot be determined
+
+If nothing matches, the app tells you exactly which values it needs, and how to get them: fork [nothingnesscore/BruhKernel](https://github.com/nothingnesscore/BruhKernel), run the build for your exact target, then point BootPatcher at your fork.
+
+### 📖 Newbie Guide: Step-by-Step to a Patched Boot Image
 
 If you have never patched or flashed a boot image before, follow these simple steps:
 
@@ -70,18 +102,13 @@ Anyone can fork `nothingnesscore/BruhKernel` or build custom kernels and patch s
 
 ---
 
-## 📱 [SOON] Rooted Android APK Plan: `BootPatcher Mobile`
+## 📱 Rooted Android APK Plan: `BootPatcher Mobile`
 
-We are planning an on-device Android application for rooted users to eliminate PC/Telegram steps entirely:
+The on-device app described above is now implemented. Remaining work:
 
-* **Tag:** `[SOON]`
-* **Target OS:** Android 11+ (Root required via KernelSU / APatch / Magisk)
-* **Architecture Blueprint:**
-  1. **Direct Partition Dumper:** Uses `libsu` root shell to automatically locate and dump the active slot's boot partition (`/dev/block/by-name/boot_a` or `boot_b`).
-  2. **On-Device Kernel Inspection:** Reads `/proc/version` and parses the local boot image header to display current kernel banner, architecture, and patch level.
-  3. **BruhKernel Cloud Sync:** Queries the BruhKernel API for the latest builds matching the active Android version and kernel branch (e.g. `android14-6.1`).
-  4. **Embedded On-Device `magiskboot` Engine:** Bundles pre-compiled ARM64 `magiskboot` directly in the APK assets. Unpacks the partition, substitutes the `Image` kernel, and repacks locally in seconds.
-  5. **Direct In-App Flashing:** One-tap flashing to the inactive slot (OTA style) or active boot partition with automatic backup creation to prevent bootloops.
+* Direct partition dumping via root shell (`libsu`) so the app can read the active slot itself.
+* One-tap flashing to the inactive slot with automatic backup.
+* Fork selection and a token field in Settings (the resolver already supports both).
 
 ---
 

@@ -10,3 +10,18 @@ build/
 *.session-journal
 temp_inspect/
 scratch/
+
+# Android / Gradle
+.gradle/
+local.properties
+*.apk
+*.aab
+captures/
+.cxx/
+
+# Windows / editors
+Thumbs.db
+desktop.ini
+.idea/
+*.iml
+.vscode/

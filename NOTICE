@@ -1,0 +1,60 @@
+BootPatcher
+Copyright (C) 2026 nothingnesscore
+
+This project is licensed under the GNU General Public License, version 2.
+The full text is in the LICENSE file at the repository root.
+
+SPDX-License-Identifier: GPL-2.0-only
+
+
+WHY GPL-2.0
+------------
+
+BootPatcher ships and modifies Linux kernel images. The Linux kernel is
+GPL-2.0, and the output of this tool is a modified kernel image, so the
+source here is distributed under the same terms.
+
+You must include a copy of the GPL-2.0 when redistributing patched boot
+images, and offer the corresponding source of the kernel you used.
+
+
+VENDORED THIRD-PARTY CODE
+-------------------------
+
+app/src/main/assets/magiskboot
+    Extracted unmodified from the official Magisk APK release
+    (topjohnwu/Magisk, https://github.com/topjohnwu/Magisk), specifically
+    lib/arm64-v8a/libmagiskboot.so.
+
+    Magisk is GPL-3.0. Copyright (C) 2018-2025 Topjohnwu.
+    Source: https://github.com/topjohnwu/Magisk
+
+    This is the ARM64 build, so the patching engine runs on the phone. The
+    x86-64 build in bin/magiskboot is used instead by the GitHub Actions
+    runner and remains under the same license.
+
+bin/magiskboot
+    x86-64 build of magiskboot used by the Telegram bot workflow on the
+    GitHub Actions runner. Same origin and license as the asset above.
+
+
+BUNDLED KERNELS
+---------------
+
+No kernels are vendored. BootPatcher downloads artifacts from
+nothingnesscore/BruhKernel at runtime. Those images are covered by the
+BruhKernel GPL-2.0-only license and its NOTICE.
+
+
+ACKNOWLEDGED WORK
+-----------------
+
+BootKernelChanger, by Dayto0 (https://github.com/Dayto0/BootKernelChanger)
+    The original concept of replacing the kernel binary inside a boot.img
+    using magiskboot.
+
+nothingnesscore/BruhKernel (https://github.com/nothingnesscore/BruhKernel)
+    The GKI kernel build pipeline whose artifacts this app patches with.
+
+topjohnwu/Magisk (https://github.com/topjohnwu/Magisk)
+    magiskboot, used to unpack and repack boot images.

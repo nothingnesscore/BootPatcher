@@ -1,0 +1,24 @@
+# Keep shell scripts and the Gradle wrapper LF-only. On a Windows checkout
+# without this, ./gradlew fails on CI with a bad interpreter error.
+* text=auto eol=lf
+
+*.sh text eol=lf
+gradlew text eol=lf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+*.kt text
+*.kts text
+*.java text
+*.xml text
+*.json text
+*.md text
+*.yml text
+*.toml text
+*.pro text
+
+# Binary assets must never be touched.
+*.apk binary
+*.jar binary
+*.so binary
+magiskboot binary

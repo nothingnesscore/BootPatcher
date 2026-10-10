@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      A plain splash theme so the app starts on the system background before
+      Compose takes over. Colours are deliberately neutral; the real palette is
+      derived from Monet at runtime in ui/theme/Theme.kt.
+    -->
+    <style name="Theme.BootPatcher" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
+</resources>

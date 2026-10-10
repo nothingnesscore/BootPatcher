@@ -1,0 +1,111 @@
+name: Build Android APK
+
+# Mirrors the BruhKernel posture: builds happen on explicit request or on a
+# real source change, never on documentation-only edits.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle.properties"
+      - ".github/workflows/build-apk.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - "build.gradle.kts"
+      - "settings.gradle.kts"
+      - "gradle.properties"
+      - ".github/workflows/build-apk.yml"
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Which APK to produce"
+        required: true
+        default: "release"
+        type: choice
+        options: [release, debug]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run unit tests
+        # The boot image parser and compatibility checker are the safety
+        # critical part of this app, so they gate every build.
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report
+          path: app/build/reports/tests/testDebugUnitTest
+          retention-days: 7
+
+  build:
+    name: Assemble ${{ inputs.variant || 'release' }}
+    needs: test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build APK
+        run: ./gradlew assemble${{ inputs.variant == 'debug' && 'Debug' || 'Release' }} --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: BootPatcher-${{ inputs.variant || 'release' }}-apk
+          path: app/build/outputs/apk/${{ inputs.variant == 'debug' && 'debug' || 'release' }}/*.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish APK to Releases
+        if: startsWith(github.ref, 'refs/tags/apk-v*')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/*.apk
+          fail_on_unmatched_files: true
+          body: |
+            ## BootPatcher APK
+
+            Install the `release` APK to patch a stock `boot.img` with a
+            BruhKernel GKI kernel on-device.
+
+            > Patching refuses to run when the Android version, kernel version,
+            > security patch level, header version or architecture do not match
+            > the selected kernel.
+
+            **Source:** see `app/src/main/java/com/nothingnesscore/bootpatcher/core`
