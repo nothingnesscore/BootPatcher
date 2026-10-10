@@ -75,8 +75,17 @@ jobs:
           distribution: temurin
           java-version: "17"
 
+      # android-actions/setup-android@v3 runs `sdkmanager tools`, and the
+      # deprecated "tools" package no longer exists in the repository, so that
+      # action fails with "Failed to find package 'tools'". Install exactly
+      # what the build needs instead.
       - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(command -v sdkmanager || echo "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager")"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          "$SDKMANAGER" --list_installed | grep -E 'platforms;android-34|build-tools;34.0.0'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
