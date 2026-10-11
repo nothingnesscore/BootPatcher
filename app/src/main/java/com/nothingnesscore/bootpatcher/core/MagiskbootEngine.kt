@@ -115,6 +115,91 @@ class MagiskbootEngine(private val context: Context) {
         }
     }
 
+    /**
+     * What magiskboot reports about an unpacked boot image.
+     *
+     * Every field is nullable because an image that fails to unpack, or that
+     * omits a key, must be reported as unknown rather than guessed.
+     */
+    data class InspectedBoot(
+        val format: String?,
+        val headerVersion: Int?,
+        val osVersion: String?,
+        val osPatchLevel: String?,
+        val kernelBanner: String?,
+        val kernelVersion: String?,
+        val arch: String?,
+        val error: String? = null,
+    )
+
+    /**
+     * Unpacks [bootImage] with magiskboot and reports what it finds.
+     *
+     * This is the authoritative inspection path. Reading the raw header alone
+     * is not enough, because on GKI images the kernel is usually stored
+     * compressed (lz4 or gzip) and its "Linux version" banner simply does not
+     * appear in the raw bytes. magiskboot decompresses it first, which is why
+     * the existing Actions patcher inspects the same way.
+     */
+    fun inspect(bootImage: File): InspectedBoot {
+        val magiskboot = try {
+            fromAssets(context)
+        } catch (e: Exception) {
+            return InspectedBoot(null, null, null, null, null, null, null,
+                e.message ?: "magiskboot is unavailable")
+        }
+
+        val dir = bootDir("inspect-${System.nanoTime()}")
+        try {
+            val local = File(dir, "boot.img")
+            bootImage.copyTo(local, overwrite = true)
+
+            try {
+                run(magiskboot, listOf("unpack", local.absolutePath), dir)
+            } catch (e: PatchFailure) {
+                return InspectedBoot(null, null, null, null, null, null, null,
+                    "magiskboot could not unpack this image: ${e.message}")
+            }
+
+            val header = readHeaderFile(File(dir, "header"))
+            val kernel = File(dir, "kernel")
+
+            var banner: String? = null
+            var version: String? = null
+            var arch: String? = null
+            if (kernel.exists() && kernel.length() > 0) {
+                val scanned = KernelInspector.scanKernel(kernel)
+                banner = scanned.banner
+                version = scanned.version
+                arch = scanned.arch
+            }
+
+            return InspectedBoot(
+                format = header["format"],
+                headerVersion = header["header_version"]?.trim()?.toIntOrNull(),
+                osVersion = header["os_version"],
+                osPatchLevel = header["os_patch_level"],
+                kernelBanner = banner,
+                kernelVersion = version,
+                arch = arch,
+                error = null,
+            )
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    /** magiskboot writes a `header` file of key=value pairs. */
+    private fun readHeaderFile(file: File): Map<String, String> {
+        if (!file.exists()) return emptyMap()
+        val out = mutableMapOf<String, String>()
+        file.readLines().forEach { line ->
+            val idx = line.indexOf('=')
+            if (idx > 0) out[line.substring(0, idx).trim()] = line.substring(idx + 1).trim()
+        }
+        return out
+    }
+
     private fun log(sb: StringBuilder, dir: File, block: () -> Unit) {
         block()
         sb.appendLine("--- $dir ---")

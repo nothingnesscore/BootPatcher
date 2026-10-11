@@ -196,8 +196,12 @@ object KernelInspector {
      * non-ELF kernels return null, which the checker treats as a hard stop
      * rather than assuming arm64.
      */
-    private fun detectArch(file: RandomAccessFile, kernelStart: Long): String? {
-        file.seek(kernelStart)
+    private fun detectArch(file: RandomAccessFile, kernelStart: Long): String? =
+        archAt(file, kernelStart)
+
+    /** Reads an ELF machine field at an absolute offset in an open file. */
+    fun archAt(file: RandomAccessFile, offset: Long): String? {
+        file.seek(offset)
         val hdr = ByteArray(ELF_HEADER_BYTES)
         var n = 0
         while (n < hdr.size) {
@@ -211,13 +215,15 @@ object KernelInspector {
         ) return null
 
         val machine = ((hdr[19].toInt() and 0xff) shl 8) or (hdr[18].toInt() and 0xff)
-        return when (machine) {
-            0x3e -> "x86_64"     // EM_X86_64
-            0xb7 -> "arm64"      // EM_AARCH64
-            0xf3 -> "riscv64"    // EM_RISCV
-            0x28 -> "arm"        // EM_ARM
-            else -> null
-        }
+        return archForMachine(machine)
+    }
+
+    fun archForMachine(machine: Int): String? = when (machine) {
+        0x3e -> "x86_64"     // EM_X86_64
+        0xb7 -> "arm64"      // EM_AARCH64
+        0xf3 -> "riscv64"    // EM_RISCV
+        0x28 -> "arm"        // EM_ARM
+        else -> null
     }
 
     private fun findBanner(file: RandomAccessFile, kernelStart: Long): String? {
@@ -234,4 +240,60 @@ object KernelInspector {
         val idx = text.indexOf("Linux version ")
         return if (idx < 0) null else text.substring(idx)
     }
+
+    /**
+     * Scans a standalone, already decompressed kernel file.
+     *
+     * magiskboot hands back the kernel as its own file, which can be tens of
+     * megabytes. The banner is not guaranteed to sit near the start, so the
+     * whole file is streamed in overlapping chunks rather than sampled once.
+     */
+    fun scanKernel(kernel: java.io.File): Result {
+        if (!kernel.exists() || kernel.length() == 0L) return Result(null, null, null)
+
+        var arch: String? = null
+        var banner: String? = null
+
+        kernel.inputStream().buffered().use { input ->
+            val chunk = ByteArray(CHUNK)
+            var carry = 0
+            while (true) {
+                val n = input.read(chunk, carry, CHUNK - carry)
+                if (n <= 0) break
+                val size = carry + n
+                val text = String(chunk, 0, size, Charsets.ISO_8859_1)
+
+                if (arch == null && text.length >= 20) {
+                    arch = if (text.startsWith("\u007fELF")) {
+                        archForMachine(
+                            ((chunk[19].toInt() and 0xff) shl 8) or (chunk[18].toInt() and 0xff)
+                        )
+                    } else null
+                }
+
+                if (banner == null) {
+                    val idx = text.indexOf(BANNER)
+                    if (idx >= 0) {
+                        val rest = text.substring(idx)
+                        val nl = rest.indexOf('\n')
+                        banner = if (nl >= 0) rest.substring(0, nl).trim() else rest.trim()
+                    }
+                }
+
+                if (banner != null && arch != null) break
+
+                // Retain a small overlap so a banner split across the chunk
+                // boundary is still found on the next pass.
+                carry = minOf(OVERLAP, size)
+                System.arraycopy(chunk, size - carry, chunk, 0, carry)
+            }
+        }
+
+        val version = banner?.let { VERSION_RE.find(it)?.groupValues?.getOrNull(1) }
+        return Result(banner, version, arch)
+    }
+
+    private const val BANNER = "Linux version "
+    private const val CHUNK = 1 shl 20
+    private const val OVERLAP = 256
 }

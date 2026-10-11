@@ -33,8 +33,19 @@ data class UiState(
     val advisory: List<String> = emptyList(),
     val outputFile: File? = null,
     val error: String? = null,
+    val detectedFormat: String? = null,
+    val detectedOsVersion: String? = null,
+    val detectedPatchLevel: String? = null,
+    val detectedHeaderVersion: Int? = null,
+    val inspectError: String? = null,
 ) {
     val canPatch: Boolean get() = step == Step.IDLE && stockInfo != null
+}
+
+/** magiskboot reports the patch level as YYYY-MM-DD; the UI shows YYYY-MM. */
+fun MagiskbootEngine.InspectedBoot.patchLevelFrom(raw: String?): String? {
+    val v = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return CompatibilityChecker.normalizeSpl(v)
 }
 
 class PatchViewModel(app: Application) : AndroidViewModel(app) {
@@ -53,33 +64,57 @@ class PatchViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 val work = File(ctx.cacheDir, "inspect-${System.nanoTime()}")
                 work.mkdirs()
-                val scanned = try {
-                    withContext(Dispatchers.IO) {
+
+                try {
+                    val stock = withContext(Dispatchers.IO) {
                         val tmp = File(work, "stock.img")
-                        ctx.contentResolver.openInputStream(uri)!!.use { i ->
-                            tmp.outputStream().use { o -> i.copyTo(o) }
-                        }
-                        RandomAccessFile(tmp, "r").use { raf ->
+                        val stream = ctx.contentResolver.openInputStream(uri)
+                            ?: throw IllegalStateException("Could not open the selected file.")
+                        stream.use { i -> tmp.outputStream().use { o -> i.copyTo(o) } }
+                        tmp
+                    }
+
+                    // Prefer magiskboot: it decompresses the kernel, which is
+                    // the only reliable way to read the version banner, since
+                    // on GKI images the kernel is stored lz4/gzip compressed
+                    // and the string is absent from the raw bytes. Fall back to
+                    // the raw header parser if magiskboot cannot run.
+                    val unpacked = withContext(Dispatchers.IO) { engine.inspect(stock) }
+                    val raw = withContext(Dispatchers.IO) {
+                        RandomAccessFile(stock, "r").use { raf ->
                             val info = BootImageParser.parse(raf)
-                            val kernel = KernelInspector.inspect(raf, info)
-                            info to kernel
+                            val k = KernelInspector.inspect(raf, info)
+                            info to k
                         }
                     }
+
+                    val (boot, rawKernel) = raw
+                    // Prefer whichever source actually produced a banner.
+                    val kernelVersion = unpacked.kernelVersion ?: rawKernel.version
+                    val kernelBanner = unpacked.kernelBanner ?: rawKernel.banner
+                    val arch = unpacked.arch ?: rawKernel.arch
+
+                    _state.update {
+                        it.copy(
+                            step = Step.IDLE,
+                            status = if (kernelVersion != null) "Inspected" else
+                                (unpacked.error ?: "Inspected (kernel banner not found)"),
+                            stockName = uri.lastPathSegment?.substringAfterLast('/'),
+                            stockInfo = boot,
+                            stockKernel = KernelInspector.Result(kernelBanner, kernelVersion, arch),
+                            // magiskboot's header is authoritative when it parsed.
+                            detectedFormat = unpacked.format,
+                            detectedOsVersion = unpacked.osVersion
+                                ?: boot.androidMajor?.let { "Android $it" },
+                            detectedPatchLevel = unpacked.patchLevelFrom(unpacked.osPatchLevel)
+                                ?: boot.patchLevelString,
+                            detectedHeaderVersion = unpacked.headerVersion ?: boot.headerVersion,
+                            inspectError = unpacked.error,
+                        )
+                    }
                 } finally {
+                    // Never leave a copy of a multi-megabyte boot image behind.
                     work.deleteRecursively()
-                }
-
-                val boot = scanned.first
-                val kernel = scanned.second
-
-                _state.update {
-                    it.copy(
-                        step = Step.IDLE,
-                        status = "Inspected",
-                        stockName = uri.lastPathSegment?.substringAfterLast('/'),
-                        stockInfo = boot,
-                        stockKernel = kernel,
-                    )
                 }
             } catch (e: Exception) {
                 _state.update {
@@ -115,15 +150,40 @@ class PatchViewModel(app: Application) : AndroidViewModel(app) {
                         }
 
                         val info = RandomAccessFile(stock, "r").use { BootImageParser.parse(it) }
-                        val inspected = RandomAccessFile(stock, "r").use { KernelInspector.inspect(it, info) }
+
+                        // Validate against the unpacked kernel, not the raw
+                        // bytes: on GKI images the kernel is compressed, so the
+                        // raw scan cannot see the banner and would either read
+                        // an empty version or silently compare against the
+                        // wrong one.
+                        val unpacked = engine.inspect(stock)
+                        val rawKernel = RandomAccessFile(stock, "r").use { KernelInspector.inspect(it, info) }
+                        val kernelVersion = unpacked.kernelVersion ?: rawKernel.version
+                        val arch = unpacked.arch ?: rawKernel.arch
+
+                        if (kernelVersion.isNullOrBlank()) {
+                            throw CompatibilityException(
+                                listOf(
+                                    "Could not read a kernel version from this boot image, so " +
+                                        "compatibility cannot be proven.",
+                                    unpacked.error
+                                        ?: "The kernel may be compressed or the image may not be a boot.img.",
+                                )
+                            )
+                        }
+
+                        val inspected = KernelInspector.Result(
+                            unpacked.kernelBanner ?: rawKernel.banner,
+                            kernelVersion,
+                            arch,
+                        )
 
                         val spec = TargetSpec(
-                            androidMajor = inspected.version?.substringBefore('.')?.toIntOrNull()
-                                ?: info.androidMajor ?: 0,
-                            kernelVersion = inspected.version ?: "",
+                            androidMajor = info.androidMajor ?: 0,
+                            kernelVersion = kernelVersion,
                             osPatchLevel = info.patchLevelString ?: "",
                             bootHeaderVersion = info.headerVersion,
-                            arch = inspected.arch,
+                            arch = arch,
                         )
                         val verdict = CompatibilityChecker.compare(info, inspected, spec)
                         if (!verdict.ok) {

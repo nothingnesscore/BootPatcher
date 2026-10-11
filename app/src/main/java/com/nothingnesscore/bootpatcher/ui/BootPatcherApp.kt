@@ -1,9 +1,11 @@
 package com.nothingnesscore.bootpatcher.ui
 
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
-import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,29 +16,21 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
-import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.filled.ErrorOutline
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -45,162 +39,175 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.nothingnesscore.bootpatcher.ui.theme.BootPatcherTheme
+import com.nothingnesscore.bootpatcher.ui.theme.GlassButton
+import com.nothingnesscore.bootpatcher.ui.theme.GlassNavigationBar
+import com.nothingnesscore.bootpatcher.ui.theme.GlassShapeSmall
+import com.nothingnesscore.bootpatcher.ui.theme.GlassSurface
 
-private enum class Tab(val label: String) { PATCH("Patch"), FLAVOR("Flavor"), SETTINGS("Settings") }
+private enum class Tab(val label: String, val icon: ImageVector) {
+    PATCH("Patch", Icons.Filled.Build),
+    FLAVOR("Flavor", Icons.Filled.FolderOpen),
+    SETTINGS("Settings", Icons.Filled.Tune),
+}
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BootPatcherApp(vm: PatchViewModel = viewModel()) {
     val state by vm.state.collectAsStateWithLifecycle()
     var tab by remember { mutableStateOf(Tab.PATCH) }
     var blurTop by remember { mutableStateOf(true) }
     var blurBottom by remember { mutableStateOf(true) }
-    var stockUri by remember { mutableStateOf<Uri?>(null) }
-    var kernelUri by remember { mutableStateOf<Uri?>(null) }
 
     BootPatcherTheme {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text("BootPatcher", fontWeight = FontWeight.SemiBold) },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = if (blurTop)
-                            MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)
-                        else MaterialTheme.colorScheme.surface,
-                    ),
-                    modifier = Modifier.statusBarsPadding(),
+        // Ambient gradient wash so the glass has something to refract.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                            MaterialTheme.colorScheme.background,
+                            MaterialTheme.colorScheme.secondary.copy(alpha = 0.12f),
+                        )
+                    )
                 )
-            },
-            bottomBar = {
-                NavigationBar(
-                    containerColor = if (blurBottom)
-                        MaterialTheme.colorScheme.surface.copy(alpha = 0.72f)
-                    else MaterialTheme.colorScheme.surface,
-                    modifier = Modifier.navigationBarsPadding(),
+        ) {
+            Column(Modifier.fillMaxSize()) {
+                // Floating glass title bar, no opaque AppBar.
+                GlassSurface(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    shape = RoundedCornerShape(26.dp),
+                    blurRadius = if (blurTop) 20.dp else 0.dp,
+                    tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.05f),
                 ) {
-                    Tab.entries.forEach { t ->
-                        NavigationBarItem(
-                            selected = tab == t,
-                            onClick = { tab = t },
-                            icon = {
-                                Icon(
-                                    when (t) {
-                                        Tab.PATCH -> Icons.Filled.Build
-                                        Tab.FLAVOR -> Icons.Filled.Folder
-                                        Tab.SETTINGS -> Icons.Filled.Settings
-                                    },
-                                    contentDescription = t.label,
-                                )
-                            },
-                            label = { Text(t.label) },
+                    Row(
+                        Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "BootPatcher",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Icon(
+                            Icons.Filled.Verified,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(18.dp),
                         )
                     }
                 }
-            },
-        ) { padding ->
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .padding(padding),
-            ) {
-                when (tab) {
-                    Tab.PATCH -> PatchScreen(
-                        state = state,
-                        stockUri = stockUri,
-                        kernelUri = kernelUri,
-                        onStock = { u -> stockUri = u; vm.inspect(u) },
-                        onKernel = { u -> kernelUri = u },
-                        onPatch = { s, k -> vm.patch(s, k, "nothingnesscore/BruhKernel", null, null) },
-                        onReset = vm::reset,
-                    )
-                    Tab.FLAVOR -> FlavorScreen(state = state, vm = vm)
-                    Tab.SETTINGS -> SettingsScreen(blurTop, { blurTop = it }, blurBottom, { blurBottom = it })
+
+                Box(Modifier.weight(1f)) {
+                    when (tab) {
+                        Tab.PATCH -> PatchScreen(state, vm)
+                        Tab.FLAVOR -> FlavorScreen(state, vm)
+                        Tab.SETTINGS -> SettingsScreen(blurTop, { blurTop = it }, blurBottom, { blurBottom = it })
+                    }
+                }
+
+                Box(Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 12.dp)) {
+                    GlassNavigationBar(
+                        Modifier.fillMaxWidth(),
+                        blurRadius = if (blurBottom) 20.dp else 0.dp,
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Tab.entries.forEach { t ->
+                                GlassNavItem(
+                                    tab = t,
+                                    selected = tab == t,
+                                    onSelect = { tab = t },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 }
 
-/** Rounded translucent surface used across the app for the "liquid" look. */
 @Composable
-fun GlassCard(
-    modifier: Modifier = Modifier,
-    content: @Composable () -> Unit,
-) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(26.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.38f),
-        ),
-    ) { Box(Modifier.padding(18.dp)) { content() } }
+private fun GlassNavItem(tab: Tab, selected: Boolean, onSelect: () -> Unit) {
+    val tint by animateColorAsState(
+        targetValue = if (selected) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.onSurfaceVariant,
+        label = "navTint",
+    )
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier
+            .clip(RoundedCornerShape(18.dp))
+            .background(
+                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                else Color.Transparent
+            )
+            .clickable(onClick = onSelect)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+    ) {
+        Icon(tab.icon, contentDescription = tab.label, tint = tint, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.height(3.dp))
+        Text(tab.label, color = tint, fontSize = 11.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+    }
 }
 
 @Composable
-private fun PatchScreen(
-    state: UiState,
-    stockUri: Uri?,
-    kernelUri: Uri?,
-    onStock: (Uri) -> Unit,
-    onKernel: (Uri) -> Unit,
-    onPatch: (Uri, Uri) -> Unit,
-    onReset: () -> Unit,
-) {
-    val pickers = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocument(),
-    ) { uri -> uri?.let { if (stockUri == null) onStock(it) else onKernel(it) } }
+private fun PatchScreen(state: UiState, vm: PatchViewModel) {
+    var stockUri by remember { mutableStateOf<Uri?>(null) }
+    var kernelUri by remember { mutableStateOf<Uri?>(null) }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+    val stockPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { stockUri = it; vm.inspect(it) } }
+
+    val kernelPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri -> uri?.let { kernelUri = it } }
+
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        GlassCard {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("1. Stock boot image", fontWeight = FontWeight.SemiBold)
-                Text(
-                    state.stockName ?: "No image selected",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                androidx.compose.material3.TextButton(onClick = { pickers.launch(arrayOf("*/*")) }) {
-                    Icon(Icons.Filled.Folder, contentDescription = null)
+        item {
+            GlassPanel("1 · Stock boot image", state.stockName ?: "Nothing selected") {
+                GlassButton(Modifier.fillMaxWidth(), onClick = { stockPicker.launch(arrayOf("*/*")) }) {
+                    Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Choose boot.img")
                 }
             }
         }
 
-        state.stockInfo?.let { info ->
-            GlassCard {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Detected", fontWeight = FontWeight.SemiBold)
-                    InfoRow("Header", "v${info.headerVersion}")
-                    InfoRow("Android", "Android ${info.androidMajor ?: "?"}")
-                    InfoRow("Patch level", info.patchLevelString ?: "unknown")
-                    InfoRow("Kernel", state.stockKernel?.version ?: "unreadable")
-                    InfoRow("Arch", state.stockKernel?.arch ?: "unknown")
-                }
-            }
+        if (state.stockInfo != null) {
+            item { DetectedPanel(state) }
         }
 
-        GlassCard {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("2. Kernel image", fontWeight = FontWeight.SemiBold)
-                Text(
-                    kernelUri?.lastPathSegment?.substringAfterLast('/') ?: "No kernel selected",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                androidx.compose.material3.TextButton(onClick = { pickers.launch(arrayOf("*/*")) }) {
-                    Icon(Icons.Filled.Folder, contentDescription = null)
+        item {
+            GlassPanel("2 · Kernel image", kernelUri?.lastPathSegment ?: "Nothing selected") {
+                GlassButton(
+                    Modifier.fillMaxWidth(),
+                    onClick = { kernelPicker.launch(arrayOf("*/*")) },
+                ) {
+                    Icon(Icons.Filled.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Choose kernel")
                 }
@@ -208,84 +215,140 @@ private fun PatchScreen(
         }
 
         if (state.blocking.isNotEmpty()) {
-            GlassCard {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        "Cannot patch",
-                        color = MaterialTheme.colorScheme.error,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    state.blocking.forEach { Text("- $it", style = MaterialTheme.typography.bodySmall) }
-                }
+            item { BlockingPanel(state.blocking) }
+        }
+
+        item {
+            GlassButton(
+                Modifier.fillMaxWidth(),
+                enabled = stockUri != null && kernelUri != null && state.step != Step.PATCHING,
+                onClick = {
+                    val s = stockUri; val k = kernelUri
+                    if (s != null && k != null) vm.patch(s, k, "nothingnesscore/BruhKernel", null, null)
+                },
+            ) {
+                Text(if (state.step == Step.PATCHING) "Patching…" else "Patch boot image")
             }
         }
 
-        androidx.compose.material3.Button(
-            onClick = { stockUri?.let { s -> kernelUri?.let { k -> onPatch(s, k) } } },
-            enabled = stockUri != null && kernelUri != null && state.step != Step.PATCHING,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            if (state.step == Step.PATCHING) {
-                CircularProgressIndicator(Modifier.height(18.dp), strokeWidth = 2.dp)
-                Spacer(Modifier.width(10.dp))
-            }
-            Text("Patch boot image")
-        }
-
-        if (state.step == Step.DONE && state.outputFile != null) {
-            GlassCard {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Done", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
+        state.outputFile?.let { f ->
+            item {
+                GlassPanel("Done", "${f.name} · ${f.length() / 1024 / 1024} MB") {
                     Text(
-                        "Saved ${state.outputFile.name} (${state.outputFile.length() / 1024 / 1024} MB)",
+                        "Saved to the app folder. Flash it with fastboot or a custom recovery.",
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    androidx.compose.material3.TextButton(onClick = onReset) { Text("Start over") }
                 }
             }
         }
 
-        state.error?.let { err ->
-            GlassCard {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("Error", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold)
-                    Text(err, style = MaterialTheme.typography.bodySmall)
-                }
+        state.error?.let { item { ErrorPanel(it) } }
+        state.inspectError?.let { item { WarningPanel(it) } }
+    }
+}
+
+@Composable
+private fun DetectedPanel(state: UiState) {
+    GlassPanel(
+        "Detected",
+        if (state.stockKernel?.version != null) "Stock image read successfully"
+        else "Header read, kernel banner not found",
+    ) {
+        val rows = buildList {
+            add("Format" to (state.detectedFormat ?: "boot v${state.detectedHeaderVersion ?: state.stockInfo?.headerVersion}"))
+            add("Header" to "v${state.detectedHeaderVersion ?: state.stockInfo?.headerVersion ?: "?"}")
+            add("Android" to (state.detectedOsVersion ?: "unknown"))
+            add("Patch level" to (state.detectedPatchLevel ?: "unknown"))
+            add("Kernel" to (state.stockKernel?.version ?: "not found"))
+            add("Arch" to (state.stockKernel?.arch ?: "unknown"))
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            rows.forEach { (k, v) -> InfoRow(k, v) }
+            state.stockKernel?.banner?.let { b ->
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    b.take(160),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
 }
 
 @Composable
+private fun BlockingPanel(items: List<String>) {
+    GlassSurface(
+        shape = GlassShapeSmall,
+        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.10f),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    Icons.Filled.ErrorOutline,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(18.dp),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "Cannot patch",
+                    color = MaterialTheme.colorScheme.error,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            items.forEach { Text("• $it", style = MaterialTheme.typography.bodySmall) }
+        }
+    }
+}
+
+@Composable
+private fun ErrorPanel(message: String) {
+    GlassSurface(
+        shape = GlassShapeSmall,
+        tint = MaterialTheme.colorScheme.error.copy(alpha = 0.10f),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Error", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.SemiBold)
+            Text(message, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun WarningPanel(message: String) {
+    GlassSurface(
+        shape = GlassShapeSmall,
+        tint = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.10f),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("Note", fontWeight = FontWeight.SemiBold)
+            Text(message, style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
 private fun FlavorScreen(state: UiState, vm: PatchViewModel) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        GlassCard {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Matching builds", fontWeight = FontWeight.SemiBold)
-                Text(
-                    state.status.ifBlank { "Inspect a stock boot image first, then look for a matching BruhKernel build." },
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                androidx.compose.material3.Button(
-                    onClick = { vm.resolveArtifact("nothingnesscore/BruhKernel", null, null) },
+        item {
+            GlassPanel("Matching builds", state.status.ifBlank { "Inspect a boot image first." }) {
+                GlassButton(
+                    Modifier.fillMaxWidth(),
                     enabled = state.stockInfo != null,
+                    onClick = { vm.resolveArtifact("nothingnesscore/BruhKernel", null, null) },
                 ) { Text("Search BruhKernel") }
             }
         }
-        GlassCard {
-            Row(verticalAlignment = Alignment.Top) {
-                Icon(Icons.Filled.Info, contentDescription = null)
-                Spacer(Modifier.width(10.dp))
+        item {
+            GlassPanel("Strict matching", "Android version, kernel version and security patch level must all agree.") {
                 Text(
-                    "Builds are matched on Android version, kernel version and security patch " +
-                        "level together. If nothing matches, fork BruhKernel and build the " +
-                        "exact target first.",
+                    "If nothing matches, fork BruhKernel and build the exact target first.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -300,34 +363,42 @@ private fun SettingsScreen(
     blurBottom: Boolean,
     onBlurBottom: (Boolean) -> Unit,
 ) {
-    Column(
-        Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
-        GlassCard {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Appearance", fontWeight = FontWeight.SemiBold)
-                ToggleRow("Blur top bar", blurTop, onBlurTop)
-                ToggleRow("Blur bottom bar", blurBottom, onBlurBottom)
+        item {
+            GlassPanel("Appearance", "Liquid Glass surfaces and blur") {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    ToggleRow("Blur top bar", blurTop, onBlurTop)
+                    ToggleRow("Blur bottom bar", blurBottom, onBlurBottom)
+                }
+            }
+        }
+        item {
+            GlassPanel("Safety", "Patching is refused on any mismatch") {
                 Text(
-                    "Colours follow the system Monet palette where available.",
+                    "A kernel built for a different Android version or security patch level " +
+                        "will not boot, so BootPatcher stops instead of guessing.",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
         }
-        GlassCard {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("Safety", fontWeight = FontWeight.SemiBold)
-                Text(
-                    "BootPatcher refuses to patch when the Android version, kernel version, " +
-                        "security patch level, header version or architecture do not match. " +
-                        "A wrong kernel here means a bootloop.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
+    }
+}
+
+@Composable
+private fun GlassPanel(title: String, subtitle: String, content: @Composable () -> Unit) {
+    GlassSurface(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            content()
         }
     }
 }
@@ -339,15 +410,49 @@ private fun ToggleRow(label: String, checked: Boolean, onChange: (Boolean) -> Un
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label)
-        Switch(checked = checked, onCheckedChange = onChange)
+        Text(label, style = MaterialTheme.typography.bodyMedium)
+        SwitchPill(checked, onChange)
+    }
+}
+
+@Composable
+private fun SwitchPill(checked: Boolean, onChange: (Boolean) -> Unit) {
+    val track by animateColorAsState(
+        targetValue = if (checked) MaterialTheme.colorScheme.primary
+        else MaterialTheme.colorScheme.surfaceVariant,
+        label = "switchTrack",
+    )
+    val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    Box(
+        Modifier
+            .size(width = 48.dp, height = 28.dp)
+            .clip(RoundedCornerShape(100.dp))
+            .background(track)
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                onClick = { onChange(!checked) }
+            ),
+        contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart,
+    ) {
+        Box(
+            Modifier
+                .padding(horizontal = 3.dp)
+                .size(22.dp)
+                .clip(RoundedCornerShape(100.dp))
+                .background(Color.White.copy(alpha = 0.92f))
+        )
     }
 }
 
 @Composable
 private fun InfoRow(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, style = MaterialTheme.typography.bodySmall)
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         Text(value, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
     }
 }

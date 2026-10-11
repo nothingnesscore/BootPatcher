@@ -21,6 +21,9 @@
 -keep class com.nothingnesscore.bootpatcher.ui.UiState { *; }
 -keep class com.nothingnesscore.bootpatcher.ui.Step { *; }
 
+# The glass primitives are @Composable entry points resolved by name.
+-keep class com.nothingnesscore.bootpatcher.ui.theme.GlassKt { *; }
+
 # Compose reads LocalLifecycleOwner reflectively; keep the owner plumbing that
 # provides it.
 -keep class androidx.lifecycle.compose.** { *; }
