@@ -89,10 +89,31 @@ class PatchViewModel(app: Application) : AndroidViewModel(app) {
                     }
 
                     val (boot, rawKernel) = raw
-                    // Prefer whichever source actually produced a banner.
                     val kernelVersion = unpacked.kernelVersion ?: rawKernel.version
                     val kernelBanner = unpacked.kernelBanner ?: rawKernel.banner
                     val arch = unpacked.arch ?: rawKernel.arch
+
+                    // If the kernel could not be identified at all, say so.
+                    // Previously this degraded silently to the raw parser,
+                    // which reports "unreadable" for any compressed GKI kernel
+                    // and hides the real reason from the user.
+                    if (kernelVersion == null) {
+                        _state.update {
+                            it.copy(
+                                step = Step.FAILED,
+                                status = "Could not read the kernel",
+                                stockName = uri.lastPathSegment?.substringAfterLast('/'),
+                                stockInfo = boot,
+                                stockKernel = KernelInspector.Result(kernelBanner, kernelVersion, arch),
+                                detectedFormat = unpacked.format ?: "boot v${boot.headerVersion}",
+                                detectedHeaderVersion = unpacked.headerVersion ?: boot.headerVersion,
+                                error = unpacked.error
+                                    ?: "The kernel version could not be read from this image, " +
+                                    "so it cannot be verified as safe to patch.",
+                            )
+                        }
+                        return@launch
+                    }
 
                     _state.update {
                         it.copy(

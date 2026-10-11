@@ -202,27 +202,65 @@ object KernelInspector {
     /** Reads an ELF machine field at an absolute offset in an open file. */
     fun archAt(file: RandomAccessFile, offset: Long): String? {
         file.seek(offset)
-        val hdr = ByteArray(ELF_HEADER_BYTES)
+        val head = ByteArray(1024)
         var n = 0
-        while (n < hdr.size) {
-            val r = file.read(hdr, n, hdr.size - n)
+        while (n < head.size) {
+            val r = file.read(head, n, head.size - n)
             if (r <= 0) break
             n += r
         }
-        if (n < 20) return null
-        if (hdr[0] != 0x7f.toByte() || hdr[1] != 'E'.code.toByte() ||
-            hdr[2] != 'L'.code.toByte() || hdr[3] != 'F'.code.toByte()
-        ) return null
+        return archFrom(head, n)
+    }
 
-        val machine = ((hdr[19].toInt() and 0xff) shl 8) or (hdr[18].toInt() and 0xff)
-        return archForMachine(machine)
+    /**
+     * Determines the kernel architecture from its image header.
+     *
+     * Android kernels are not always ELF. GKI kernels in particular are
+     * commonly PE/COFF objects (the `MZ` magic is the PE/COFF DOS stub used by
+     * the PE format), and reading those as ELF yields a null architecture,
+     * which would block every patch. Both formats are therefore handled, and an
+     * unrecognised format still returns null so the checker can refuse rather
+     * than assume arm64.
+     */
+    fun archFrom(head: ByteArray, length: Int): String? {
+        if (length < 20) return null
+
+        // ELF: 0x7F 'E' 'L' 'F', machine at 18..19
+        if (head[0] == 0x7f.toByte() && head[1] == 'E'.code.toByte() &&
+            head[2] == 'L'.code.toByte() && head[3] == 'F'.code.toByte()
+        ) {
+            val machine = ((head[19].toInt() and 0xff) shl 8) or (head[18].toInt() and 0xff)
+            return archForMachine(machine)
+        }
+
+        // PE/COFF: 'MZ' stub, e_lfanew at 0x3C, then "PE\0\0", machine at +4
+        if (head[0] == 'M'.code.toByte() && head[1] == 'Z'.code.toByte() && length >= 0x40) {
+            val peOffset = ((head[0x3f].toInt() and 0xff) shl 24) or
+                ((head[0x3e].toInt() and 0xff) shl 16) or
+                ((head[0x3d].toInt() and 0xff) shl 8) or
+                (head[0x3c].toInt() and 0xff)
+            if (peOffset in 0 until (length - 6)) {
+                if (head[peOffset] == 'P'.code.toByte() && head[peOffset + 1] == 'E'.code.toByte()) {
+                    val machine = ((head[peOffset + 5].toInt() and 0xff) shl 8) or
+                        (head[peOffset + 4].toInt() and 0xff)
+                    return archForMachine(machine)
+                }
+            }
+        }
+        return null
     }
 
     fun archForMachine(machine: Int): String? = when (machine) {
+        // ELF (EM_*) and PE/COFF (IMAGE_FILE_MACHINE_*) encode the same
+        // architecture with different values, so both are listed.
         0x3e -> "x86_64"     // EM_X86_64
+        0x8664 -> "x86_64"    // IMAGE_FILE_MACHINE_AMD64
         0xb7 -> "arm64"      // EM_AARCH64
+        0xAA64 -> "arm64"    // IMAGE_FILE_MACHINE_ARM64
         0xf3 -> "riscv64"    // EM_RISCV
         0x28 -> "arm"        // EM_ARM
+        0x1c0 -> "arm"       // IMAGE_FILE_MACHINE_ARM
+        0x1c4 -> "arm64"     // IMAGE_FILE_MACHINE_ARM64 (alternate)
         else -> null
     }
 
@@ -263,12 +301,10 @@ object KernelInspector {
                 val size = carry + n
                 val text = String(chunk, 0, size, Charsets.ISO_8859_1)
 
-                if (arch == null && text.length >= 20) {
-                    arch = if (text.startsWith("\u007fELF")) {
-                        archForMachine(
-                            ((chunk[19].toInt() and 0xff) shl 8) or (chunk[18].toInt() and 0xff)
-                        )
-                    } else null
+                if (arch == null) {
+                    // archFrom handles both ELF and PE/COFF, which is what GKI
+                    // kernels actually use.
+                    arch = archFrom(chunk.copyOf(), minOf(size, chunk.size))
                 }
 
                 if (banner == null) {

@@ -18,38 +18,71 @@ class MagiskbootEngine(private val context: Context) {
         private const val TAG = "Magiskboot"
         private const val ASSET_NAME = "magiskboot"
 
+        /** Name the binary is installed under as a native library. */
+        private const val LIB_NAME = "libmagiskboot.so"
+
         /** A real magiskboot is ~780 KB; anything smaller is a truncated copy. */
         private const val MIN_BINARY_BYTES = 400_000L
 
         /**
-         * Extracts the bundled binary to a location where it can actually be
-         * executed.
+         * Locates an executable magiskboot.
          *
-         * Android 10 (API 29) enforces W^X on the app's home directory: a file
-         * under `filesDir` or `cacheDir` can be written but not run, so
-         * `ProcessBuilder` fails with a permission error on every supported
-         * device. The app-specific external directory is exec-capable, which is
-         * the standard workaround for shipping a native helper in an APK.
+         * Verified on a real peridot (Poco F6, Android 17 / HyperOS, SELinux
+         * enforcing): an untrusted_app is denied `execute_no_trans` on files
+         * under its own `app_data_file` context, so a binary extracted to
+         * filesDir or cacheDir cannot be run no matter what mode bits it has:
+         *
+         *   avc: denied { execute_no_trans } for
+         *   path="/data/data/<pkg>/files/magiskboot"
+         *   scontext=u:r:untrusted_app_34 tcontext=u:object_r:app_data_file
+         *
+         * The APK ships the binary as lib/arm64-v8a/libmagiskboot.so, so the
+         * package manager extracts it into the app's native library directory,
+         * which is exec-permitted. That location is tried first. The app's own
+         * data directory is only a fallback for devices with a laxer policy.
          */
         fun fromAssets(context: Context): File {
-            val dir = context.getExternalFilesDir(null) ?: context.filesDir
-            val target = File(dir, ASSET_NAME)
-
-            if (target.exists() && target.length() > MIN_BINARY_BYTES) {
-                target.setExecutable(true, false)
-                return target
+            val candidates = buildList {
+                // Extracted by the package manager at install time.
+                add(File(context.applicationInfo.nativeLibraryDir, LIB_NAME))
+                // Fallbacks: copied out of assets if the above is unavailable.
+                add(File(context.filesDir, ASSET_NAME))
+                context.getExternalFilesDir(null)?.let { add(File(it, ASSET_NAME)) }
             }
 
-            context.assets.open(ASSET_NAME).use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
+            // The binary lives in the native library directory, installed and owned by
+            // the package manager, so it is already 0755 and exec-permitted.
+            // chmod-ing it only produces SELinux setattr denials.
+            candidates.firstOrNull { it.exists() && it.length() > MIN_BINARY_BYTES }
+                ?.let { return it }
+
+            var lastError: Exception? = null
+            for (target in candidates.drop(1)) {
+                try {
+                    target.parentFile?.mkdirs()
+                    context.assets.open(ASSET_NAME).use { input ->
+                        target.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    check(target.length() > MIN_BINARY_BYTES) {
+                        "Bundled magiskboot is only ${target.length()} bytes; the asset is corrupt."
+                    }
+                    return target.makeExecutable()
+                } catch (e: Exception) {
+                    lastError = e
+                    target.delete()
+                }
             }
-            check(target.setExecutable(true, false)) {
-                "Could not mark magiskboot executable in ${dir.absolutePath}"
-            }
-            check(target.length() > MIN_BINARY_BYTES) {
-                "Bundled magiskboot is only ${target.length()} bytes; the asset is corrupt."
-            }
-            return target
+            throw IllegalStateException(
+                "Could not locate magiskboot: ${lastError?.message}", lastError
+            )
+        }
+
+        private fun File.makeExecutable(): File {
+            setReadable(true, false)
+            setReadable(true, true)
+            setExecutable(true, false)
+            setExecutable(true, true)
+            return this
         }
     }
 
@@ -154,16 +187,21 @@ class MagiskbootEngine(private val context: Context) {
             val local = File(dir, "boot.img")
             bootImage.copyTo(local, overwrite = true)
 
-            try {
+            val output = try {
                 run(magiskboot, listOf("unpack", local.absolutePath), dir)
             } catch (e: PatchFailure) {
                 return InspectedBoot(null, null, null, null, null, null, null,
                     "magiskboot could not unpack this image: ${e.message}")
             }
 
+            // magiskboot does not always write a `header` file, and on v4
+            // images the packed os_version word is frequently zero, so the
+            // authoritative values come from what magiskboot printed while
+            // unpacking. Fall back to a header file when one exists.
             val header = readHeaderFile(File(dir, "header"))
-            val kernel = File(dir, "kernel")
+            val printed = parseUnpackOutput(output)
 
+            val kernel = File(dir, "kernel")
             var banner: String? = null
             var version: String? = null
             var arch: String? = null
@@ -175,10 +213,11 @@ class MagiskbootEngine(private val context: Context) {
             }
 
             return InspectedBoot(
-                format = header["format"],
-                headerVersion = header["header_version"]?.trim()?.toIntOrNull(),
-                osVersion = header["os_version"],
-                osPatchLevel = header["os_patch_level"],
+                format = header["format"] ?: printed["format"],
+                headerVersion = header["header_version"]?.trim()?.toIntOrNull()
+                    ?: printed["header_version"]?.toIntOrNull(),
+                osVersion = header["os_version"] ?: printed["os_version"],
+                osPatchLevel = header["os_patch_level"] ?: printed["os_patch_level"],
                 kernelBanner = banner,
                 kernelVersion = version,
                 arch = arch,
@@ -200,6 +239,15 @@ class MagiskbootEngine(private val context: Context) {
         return out
     }
 
+    /**
+     * Parses the `KEY [value]` lines magiskboot prints while unpacking.
+     *
+     * Observed output for a v4 GKI image:
+     *   HEADER_VER      [4]
+     *   KERNEL_SZ       [37014016]
+     *   PAGESIZE        [4096]
+     *   KERNEL_FMT      [raw]
+     */
     private fun log(sb: StringBuilder, dir: File, block: () -> Unit) {
         block()
         sb.appendLine("--- $dir ---")
@@ -233,4 +281,40 @@ class MagiskbootEngine(private val context: Context) {
         }
         return out
     }
+}
+
+/**
+ * Parses the `KEY [value]` lines magiskboot prints while unpacking.
+ *
+ * Captured from a real peridot stock boot image:
+ *   HEADER_VER      [4]
+ *   KERNEL_SZ       [37014016]
+ *   PAGESIZE        [4096]
+ *   KERNEL_FMT      [raw]
+ *   PATCH_LEVEL     [2025-06]
+ *   OS_VERSION      [14.0.0]
+ *
+ * magiskboot does not write a `header` file for every image, so this printed
+ * output is the authoritative source for header version and page size.
+ */
+fun parseUnpackOutput(text: String): Map<String, String> {
+    val out = mutableMapOf<String, String>()
+    val re = Regex("""^\s*([A-Za-z_]+)\s+\[([^\]]*)]""", RegexOption.MULTILINE)
+    for (m in re.findAll(text)) {
+        val key = m.groupValues[1].lowercase()
+        val value = m.groupValues[2].trim()
+        when (key) {
+            "header_ver" -> out["header_version"] = value
+            "kernel_sz" -> out["kernel_size"] = value
+            "ramdisk_sz" -> out["ramdisk_size"] = value
+            "pagesize" -> out["page_size"] = value
+            "kernel_fmt" -> out["format"] = value
+            // magiskboot prints OS_VERSION and PATCH_LEVEL on v4 images, but
+            // older output uses OS_VER and OS_PATCH_LEVEL. Accept both.
+            "os_version", "os_ver" -> out["os_version"] = value
+            "os_patch_level", "patch_level" -> out["os_patch_level"] = value
+            "dtb_sz" -> out["dtb_size"] = value
+        }
+    }
+    return out
 }

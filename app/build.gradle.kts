@@ -7,6 +7,7 @@ android {
     namespace = "com.nothingnesscore.bootpatcher"
     compileSdk = 34
 
+
     defaultConfig {
         applicationId = "com.nothingnesscore.bootpatcher"
         minSdk = 29
@@ -70,9 +71,13 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
-        // magiskboot must stay executable after extraction from assets.
+        // Store .so files uncompressed so the package manager extracts them to
+        // the native library directory. SELinux denies an untrusted_app
+        // execute_no_trans on anything under its own app_data_file, so
+        // magiskboot has to be run from the extracted native lib dir rather
+        // than from filesDir or cacheDir.
         jniLibs {
-            useLegacyPackaging = false
+            useLegacyPackaging = true
         }
     }
 }
