@@ -4,10 +4,13 @@ kotlin = "1.9.24"
 coreKtx = "1.13.1"
 lifecycle = "2.8.4"
 activityCompose = "1.9.2"
-composeBom = "2024.06.00"
-material3 = "1.2.1"
-materialIcons = "1.6.8"
-splashscreen = "1.0.1"
+# Compose UI 1.7.0 is the first release that provides
+# androidx.lifecycle.compose.LocalLifecycleOwner. lifecycle-runtime-compose
+# 2.8.x reads that key, so with an older UI it is absent and
+# collectAsStateWithLifecycle crashes with
+# "CompositionLocal LocalLifecycleOwner not present".
+# Material3/icons versions come from this BOM so they stay in step.
+composeBom = "2024.10.01"
 coroutines = "1.8.1"
 
 [libraries]
@@ -21,9 +24,8 @@ androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
 androidx-compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
 androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
-androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
-androidx-compose-material-icons = { group = "androidx.compose.material", name = "material-icons-extended", version.ref = "materialIcons" }
-androidx-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "splashscreen" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-compose-material-icons = { group = "androidx.compose.material", name = "material-icons-extended" }
 kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 kotlin-test = { group = "org.jetbrains.kotlin", name = "kotlin-test", version.ref = "kotlin" }
 

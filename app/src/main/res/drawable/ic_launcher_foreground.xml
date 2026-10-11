@@ -1,12 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive icon foreground.
+
+  Adaptive icons are 108dp but launchers only guarantee the centre 72dp is
+  visible, and they mask to circles, squircles and rounded squares alike. The
+  mark is therefore built as a compact chip whose full extent stays inside a
+  66dp circle centred at 54,54, so no launcher mask can clip it.
+
+  The mark: a boot-image chip with gold contact pins along the top edge and a
+  blue hex "nut" in the middle, which reads as hardware being tuned.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Wrench glyph, kept inside the 72dp adaptive-icon safe zone. -->
-    <group android:translateX="27" android:translateY="27">
-        <path
-            android:fillColor="#FFFFFFFF"
-            android:pathData="M36.5,10.5c-4.1,0 -7.9,1.5 -10.9,4.1l6.2,6.2l-3.1,3.1l-6.2,-6.2C19.9,20.7 18.4,24.5 18.4,28.6c0,9.9 8,17.9 17.9,17.9c2,0 3.9,-0.3 5.7,-0.9V29.8h6.9C47.9,23.5 42.8,18.4 36.5,18.4zM40.6,14.8c5.7,0 10.9,3.1 13.6,7.7l-6.1,6.1l3.1,3.1l6.2,-6.2c1.5,3 2.4,6.4 2.4,10c0,9.9 -8,17.9 -17.9,17.9V40.5c9.9,0 17.9,-8 17.9,-17.9C59.8,20.5 51,14.8 40.6,14.8z" />
-    </group>
+
+    <!-- Chip: 40x44, spanning x 34..74, y 32..76. -->
+    <path
+        android:pathData="M44,32 h20 a10,10 0 0,1 10,10 v24 a10,10 0 0,1 -10,10 h-20 a10,10 0 0,1 -10,-10 v-24 a10,10 0 0,1 10,-10 z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="34" android:startY="32"
+                android:endX="74" android:endY="76"
+                android:startColor="#FFFFFFFF"
+                android:endColor="#FFD5E1FB" />
+        </aapt:attr>
+    </path>
+
+    <!-- Gold contact pins along the top edge. -->
+    <path android:fillColor="#FFC8951C"
+        android:pathData="M44,32 h5 v6 h-5 z M51.5,32 h5 v6 h-5 z M59,32 h5 v6 h-5 z" />
+
+    <!-- Hex nut, centred on the chip. -->
+    <path android:fillColor="#FF1B6BFF"
+        android:pathData="M54,43 L62.5,47.8 L62.5,57.2 L54,62 L45.5,57.2 L45.5,47.8 Z" />
+
+    <!-- Nut bore. -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M54,49.5 m-3.6,0 a3.6,3.6 0 1,0 7.2,0 a3.6,3.6 0 1,0 -7.2,0" />
+
+    <!-- Board trace below the nut. -->
+    <path android:strokeColor="#FF8FA9CF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M44,68 h20" />
 </vector>

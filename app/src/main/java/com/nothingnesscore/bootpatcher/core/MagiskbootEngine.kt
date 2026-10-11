@@ -3,6 +3,7 @@ package com.nothingnesscore.bootpatcher.core
 import android.content.Context
 import android.util.Log
 import java.io.File
+import java.io.IOException
 
 /**
  * Runs the bundled `magiskboot` binary to unpack a boot image, swap the
@@ -17,14 +18,36 @@ class MagiskbootEngine(private val context: Context) {
         private const val TAG = "Magiskboot"
         private const val ASSET_NAME = "magiskboot"
 
+        /** A real magiskboot is ~780 KB; anything smaller is a truncated copy. */
+        private const val MIN_BINARY_BYTES = 400_000L
+
+        /**
+         * Extracts the bundled binary to a location where it can actually be
+         * executed.
+         *
+         * Android 10 (API 29) enforces W^X on the app's home directory: a file
+         * under `filesDir` or `cacheDir` can be written but not run, so
+         * `ProcessBuilder` fails with a permission error on every supported
+         * device. The app-specific external directory is exec-capable, which is
+         * the standard workaround for shipping a native helper in an APK.
+         */
         fun fromAssets(context: Context): File {
-            val target = File(context.filesDir, ASSET_NAME)
-            if (target.exists() && target.canExecute()) return target
+            val dir = context.getExternalFilesDir(null) ?: context.filesDir
+            val target = File(dir, ASSET_NAME)
+
+            if (target.exists() && target.length() > MIN_BINARY_BYTES) {
+                target.setExecutable(true, false)
+                return target
+            }
+
             context.assets.open(ASSET_NAME).use { input ->
                 target.outputStream().use { output -> input.copyTo(output) }
             }
             check(target.setExecutable(true, false)) {
-                "Could not mark magiskboot executable"
+                "Could not mark magiskboot executable in ${dir.absolutePath}"
+            }
+            check(target.length() > MIN_BINARY_BYTES) {
+                "Bundled magiskboot is only ${target.length()} bytes; the asset is corrupt."
             }
             return target
         }
@@ -92,38 +115,27 @@ class MagiskbootEngine(private val context: Context) {
         }
     }
 
-    /** Reads the header magiskboot produced, used for post-patch verification. */
-    fun readHeader(bootImage: File): Map<String, String> {
-        val magiskboot = fromAssets(context)
-        val dir = bootDir("hdr-${System.nanoTime()}")
-        return try {
-            val local = File(dir, "boot.img")
-            bootImage.copyTo(local, overwrite = true)
-            runCatching { run(magiskboot, listOf("unpack", local.absolutePath), dir) }
-            val header = File(dir, "header")
-            if (!header.exists()) return emptyMap()
-            header.readLines()
-                .mapNotNull { line ->
-                    val idx = line.indexOf('=')
-                    if (idx <= 0) null
-                    else line.substring(0, idx).trim() to line.substring(idx + 1).trim()
-                }
-                .toMap()
-        } finally {
-            dir.deleteRecursively()
-        }
-    }
-
     private fun log(sb: StringBuilder, dir: File, block: () -> Unit) {
         block()
         sb.appendLine("--- $dir ---")
     }
 
     private fun run(bin: File, args: List<String>, cwd: File): String {
-        val proc = ProcessBuilder(bin.absolutePath, *args.toTypedArray())
-            .directory(cwd)
-            .redirectErrorStream(true)
-            .start()
+        val proc = try {
+            ProcessBuilder(bin.absolutePath, *args.toTypedArray())
+                .directory(cwd)
+                .redirectErrorStream(true)
+                .start()
+        } catch (e: IOException) {
+            // A permission error here almost always means the binary was left
+            // somewhere exec is blocked, so say so instead of surfacing a bare
+            // "EACCES".
+            throw PatchFailure(
+                "Could not run magiskboot from ${bin.parent}. " +
+                    "On this device that location is not executable.",
+                e.message ?: e.toString(),
+            )
+        }
 
         val out = proc.inputStream.bufferedReader().use { it.readText() }
         val code = proc.waitFor()
